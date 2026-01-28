@@ -37,7 +37,8 @@ SETTINGS_FILE = Path(__file__).parent.parent.parent / "settings.json"
 FFT_SIZE = 2048
 VIZ_BARS_2D = 48
 VIZ_BARS_3D = 20  # Fewer bars for 3D performance
-VIZ_UPDATE_MS = 16  # ~60fps
+VIZ_UPDATE_MS_2D = 16  # ~60fps for 2D
+VIZ_UPDATE_MS_3D = 16  # ~60fps for 3D
 CHUNK_LEN = FFT_SIZE
 
 
@@ -125,6 +126,13 @@ class MainWindow(ctk.CTk):
         self.bind("<l>", lambda e: self._toggle_loop())
         self.bind("<L>", lambda e: self._toggle_loop())
         self.focus_set()
+
+    def _on_vol_mousewheel(self, event) -> None:
+        """Handle mouse wheel on volume slider."""
+        if event.delta > 0:
+            self._volume_up()
+        elif event.delta < 0:
+            self._volume_down()
 
     def _volume_up(self) -> None:
         current = self.audio.get_volume()
@@ -310,9 +318,13 @@ class MainWindow(ctk.CTk):
         self.vol_label = ctk.CTkLabel(vol_inner, text="🔊", text_color=TEXT_DIM, font=("Segoe UI", 16))
         self.vol_label.pack(side="left", padx=(0, 10))
         
-        self.vol_slider = ctk.CTkSlider(vol_inner, from_=0, to=1, number_of_steps=100, height=5, width=130, button_length=12, button_color=TEXT, button_hover_color=self._accent, progress_color=TEXT_DIM, fg_color=CARD, command=self._on_volume)
+        self.vol_slider = ctk.CTkSlider(vol_inner, from_=0, to=1, number_of_steps=100, height=12, width=130, button_length=14, button_color=TEXT, button_hover_color=self._accent, progress_color=TEXT_DIM, fg_color=CARD, command=self._on_volume)
         self.vol_slider.pack(side="left")
         self.vol_slider.set(1.0)
+        # Bind mouse wheel to volume slider
+        self.vol_slider.bind("<MouseWheel>", self._on_vol_mousewheel)
+        self.vol_slider.bind("<Button-4>", lambda e: self._volume_up())  # Linux scroll up
+        self.vol_slider.bind("<Button-5>", lambda e: self._volume_down())  # Linux scroll down
 
     def _create_visualizer(self) -> None:
         """Create the matplotlib visualizer (2D or 3D based on settings)."""
@@ -738,37 +750,41 @@ class MainWindow(ctk.CTk):
         self._tick_viz()
 
     def _tick_viz(self) -> None:
-        chunk = self.audio.get_pcm_chunk(CHUNK_LEN)
-        if chunk is not None and len(chunk) >= FFT_SIZE:
-            self.viz.push(chunk)
-        
-        target = self.viz.get_magnitudes(self._viz_bars)
-        
-        # Smooth animation
-        attack = 0.5
-        decay = 0.92
-        for i in range(self._viz_bars):
-            if target[i] > self._display_heights[i]:
-                self._display_heights[i] = attack * target[i] + (1 - attack) * self._display_heights[i]
-            else:
-                self._display_heights[i] = decay * self._display_heights[i]
+        try:
+            chunk = self.audio.get_pcm_chunk(CHUNK_LEN)
+            if chunk is not None and len(chunk) >= FFT_SIZE:
+                self.viz.push(chunk)
             
-            if self._display_heights[i] > self._peak_heights[i]:
-                self._peak_heights[i] = self._display_heights[i]
-                self._peak_decay[i] = 0
+            target = self.viz.get_magnitudes(self._viz_bars)
+            
+            # Smooth animation
+            attack = 0.5
+            decay = 0.92
+            for i in range(self._viz_bars):
+                if target[i] > self._display_heights[i]:
+                    self._display_heights[i] = attack * target[i] + (1 - attack) * self._display_heights[i]
+                else:
+                    self._display_heights[i] = decay * self._display_heights[i]
+                
+                if self._display_heights[i] > self._peak_heights[i]:
+                    self._peak_heights[i] = self._display_heights[i]
+                    self._peak_decay[i] = 0
+                else:
+                    self._peak_decay[i] += 0.008
+                    self._peak_heights[i] = max(0, self._peak_heights[i] - self._peak_decay[i])
+            
+            if self._viz_3d:
+                self._draw_3d()
             else:
-                self._peak_decay[i] += 0.008
-                self._peak_heights[i] = max(0, self._peak_heights[i] - self._peak_decay[i])
-        
-        if self._viz_3d:
-            self._draw_3d()
-        else:
-            self._draw_2d()
-        
-        self._canvas.draw_idle()
+                self._draw_2d()
+            
+            self._canvas.draw_idle()
+        except Exception:
+            pass  # Ignore errors during resize/move
         
         if self.audio.is_playing():
-            self._viz_job = self.after(VIZ_UPDATE_MS, self._tick_viz)
+            update_ms = VIZ_UPDATE_MS_3D if self._viz_3d else VIZ_UPDATE_MS_2D
+            self._viz_job = self.after(update_ms, self._tick_viz)
         else:
             self._viz_job = None
 
