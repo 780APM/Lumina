@@ -62,29 +62,30 @@ class AudioEngine:
             self._stop_stream()
             self._playing = True
             chunk = 1024
-            pos = self._pos
 
             def callback(outdata, frames: int, time_info, status):
-                nonlocal pos
                 if status:
+                    outdata.fill(0)
                     return
                 with self._lock:
                     data = self._data
                     sr = self._sr
                     vol = self._volume
+                    pos = self._pos
                 if data is None:
                     outdata.fill(0)
                     return
                 end = min(pos + frames, len(data))
                 n = end - pos
-                outdata[:n, 0] = data[pos:end] * vol
+                if n > 0:
+                    outdata[:n, 0] = data[pos:end] * vol
                 if n < frames:
                     outdata[n:, 0] = 0
-                pos = end
+                new_pos = end
                 with self._lock:
-                    self._pos = pos
+                    self._pos = new_pos
                 if self._on_position and sr > 0:
-                    cur = pos / sr
+                    cur = new_pos / sr
                     dur = len(data) / sr
                     self._on_position(cur, dur)
 
@@ -109,18 +110,11 @@ class AudioEngine:
             self._stop_stream()
 
     def seek(self, sec: float) -> None:
-        """Seek to position in seconds."""
-        was_playing = False
+        """Seek to position in seconds. Instant - no stream restart needed."""
         with self._lock:
             if self._data is None or self._sr == 0:
                 return
             self._pos = max(0, min(int(sec * self._sr), len(self._data)))
-            if self._playing and self._stream is not None:
-                self._stop_stream()
-                was_playing = True
-        # Resume playback outside the lock to avoid deadlock
-        if was_playing:
-            self.play()
 
     def is_playing(self) -> bool:
         with self._lock:

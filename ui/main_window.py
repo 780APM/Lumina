@@ -359,7 +359,7 @@ class MainWindow(ctk.CTk):
             self._ax.view_init(elev=self._view_elev, azim=self._view_azim)
             self._ax.set_xlim(-1, self._viz_bars + 1)
             self._ax.set_ylim(-0.5, 1.5)
-            self._ax.set_zlim(0, 1.1)
+            self._ax.set_zlim(-0.25, 1.1)
         else:
             # 2D setup
             self._ax.set_xlim(-0.5, self._viz_bars - 0.5)
@@ -786,12 +786,19 @@ class MainWindow(ctk.CTk):
         self._ax.view_init(elev=self._view_elev, azim=self._view_azim)
         self._ax.set_xlim(-1, self._viz_bars + 1)
         self._ax.set_ylim(-0.5, 1.5)
-        self._ax.set_zlim(0, 1.1)
+        self._ax.set_zlim(-0.25, 1.1)
         
         for i in range(self._viz_bars):
             h = max(0.03, self._display_heights[i])
             color = self._cmap(min(1.0, h * 1.3))
+            
+            # Main bar
             self._ax.bar3d(i, 0, 0, 0.85, 0.6, h, color=color, alpha=0.95, shade=True, edgecolor='none')
+            
+            # Reflection/shadow (mirrored below, faded)
+            ref_h = h * 0.3
+            ref_color = to_rgb(color)
+            self._ax.bar3d(i, 0, -ref_h - 0.02, 0.85, 0.6, ref_h, color=(*ref_color, 0.18), shade=False, edgecolor='none')
 
     def _draw_2d(self) -> None:
         """Draw fast 2D visualization."""
