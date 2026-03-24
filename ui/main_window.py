@@ -1,4 +1,4 @@
-"""Spotify-like main window for audio playback."""
+"""Spotify-like main window with WMP/Winamp-style visualization."""
 
 from __future__ import annotations
 
@@ -6,11 +6,18 @@ import json
 import random
 from pathlib import Path
 from tkinter import filedialog, colorchooser
+import tkinter as tk
 
 import customtkinter as ctk
-from matplotlib.colors import to_rgb, to_hex
+import numpy as np
+import matplotlib
+matplotlib.use("TkAgg")
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+from matplotlib.colors import LinearSegmentedColormap, to_rgb, to_hex
 
 from Lumina.audio_engine import AudioEngine
+from Lumina.visualizer import Visualizer
 
 # Default colors
 DEFAULT_ACCENT = "#1db954"
@@ -27,6 +34,13 @@ TEXT_MUTED = "#727272"
 # Settings file
 SETTINGS_FILE = Path(__file__).parent.parent.parent / "settings.json"
 
+FFT_SIZE = 2048
+VIZ_BARS_2D = 48
+VIZ_BARS_3D = 20  # Fewer bars for 3D performance
+VIZ_UPDATE_MS_2D = 16  # ~60fps for 2D
+VIZ_UPDATE_MS_3D = 16  # ~60fps for 3D
+CHUNK_LEN = FFT_SIZE
+
 
 def load_settings() -> dict:
     if SETTINGS_FILE.exists():
@@ -34,7 +48,7 @@ def load_settings() -> dict:
             return json.loads(SETTINGS_FILE.read_text())
         except Exception:
             pass
-    return {"accent": DEFAULT_ACCENT}
+    return {"accent": DEFAULT_ACCENT, "viz_3d": True}
 
 
 def save_settings(settings: dict) -> None:
@@ -57,8 +71,11 @@ class MainWindow(ctk.CTk):
         self._settings = load_settings()
         self._accent = self._settings.get("accent", DEFAULT_ACCENT)
         self._accent_hover = self._lighten_color(self._accent, 0.15)
+        self._viz_3d = self._settings.get("viz_3d", True)
 
         self.audio = AudioEngine()
+        self.viz = Visualizer(fft_size=FFT_SIZE)
+        self._viz_job: str | None = None
         self._updating_slider = False
         self._current_file: str = ""
         
@@ -66,8 +83,18 @@ class MainWindow(ctk.CTk):
         self._playlist: list[Path] = []
         self._playlist_index: int = -1
         self._shuffle = False
-        self._loop = False
+        self._loop = False  # False=no loop, True=loop playlist
         self._shuffle_order: list[int] = []
+        
+        # Smooth animation state
+        self._viz_bars = VIZ_BARS_3D if self._viz_3d else VIZ_BARS_2D
+        self._display_heights = np.zeros(self._viz_bars, dtype=np.float32)
+        self._peak_heights = np.zeros(self._viz_bars, dtype=np.float32)
+        self._peak_decay = np.zeros(self._viz_bars, dtype=np.float32)
+        
+        # 3D view angle (preserved during playback)
+        self._view_elev = 25
+        self._view_azim = -50
 
         self._build_ui()
         self._bind_shortcuts()
@@ -122,6 +149,8 @@ class MainWindow(ctk.CTk):
         self._update_vol_icon(new_vol)
 
     def _toggle_mute(self) -> None:
+        if not hasattr(self, '_pre_mute_vol'):
+            self._pre_mute_vol = 1.0
         current = self.audio.get_volume()
         if current > 0:
             self._pre_mute_vol = current
@@ -133,10 +162,10 @@ class MainWindow(ctk.CTk):
             self.vol_slider.set(self._pre_mute_vol)
             self._update_vol_icon(self._pre_mute_vol)
 
-    def _update_vol_icon(self, vol: float) -> None:
-        if vol == 0:
+    def _update_vol_icon(self, v: float) -> None:
+        if v == 0:
             self.vol_label.configure(text="🔇")
-        elif vol < 0.5:
+        elif v < 0.5:
             self.vol_label.configure(text="🔉")
         else:
             self.vol_label.configure(text="🔊")
@@ -146,9 +175,9 @@ class MainWindow(ctk.CTk):
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        # === Sidebar ===
-        self._sidebar = ctk.CTkFrame(self, fg_color=SIDEBAR_BG, width=280, corner_radius=0)
-        self._sidebar.grid(row=0, column=0, sticky="nsw")
+        # === Left Sidebar ===
+        self._sidebar = ctk.CTkFrame(self, fg_color=SIDEBAR_BG, width=300, corner_radius=0)
+        self._sidebar.grid(row=0, column=0, rowspan=2, sticky="nsew")
         self._sidebar.grid_propagate(False)
         self._sidebar.grid_columnconfigure(0, weight=1)
         self._sidebar.grid_rowconfigure(3, weight=1)
@@ -161,26 +190,38 @@ class MainWindow(ctk.CTk):
         title_left = ctk.CTkFrame(title_row, fg_color="transparent")
         title_left.grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(title_left, text="Lumina", text_color=TEXT, font=("Segoe UI Semibold", 26)).pack(anchor="w")
-        ctk.CTkLabel(title_left, text="Audio Player", text_color=TEXT_MUTED, font=("Segoe UI", 11)).pack(anchor="w")
+        ctk.CTkLabel(title_left, text="Audio Visualizer", text_color=TEXT_MUTED, font=("Segoe UI", 11)).pack(anchor="w")
         
         # Settings button
         self._settings_btn = ctk.CTkButton(title_row, text="⚙", width=36, height=36, fg_color="transparent", hover_color=CARD, text_color=TEXT_DIM, font=("Segoe UI", 18), command=self._open_settings)
-        self._settings_btn.grid(row=0, column=1, sticky="e")
-
-        # Add files button
-        self._add_btn = ctk.CTkButton(self._sidebar, text="+ Add Files", fg_color=self._accent, hover_color=self._accent_hover, text_color=TEXT, font=("Segoe UI Semibold", 13), height=42, corner_radius=21, command=self._add_files)
-        self._add_btn.grid(row=1, column=0, sticky="ew", padx=20, pady=(8, 16))
+        self._settings_btn.grid(row=0, column=1, sticky="ne", pady=4)
         
-        # Library label
-        ctk.CTkLabel(self._sidebar, text="Your Library", text_color=TEXT_MUTED, font=("Segoe UI Semibold", 12)).grid(row=2, column=0, sticky="w", padx=24, pady=(8, 8))
-
-        # Playlist
-        self._playlist_frame = ctk.CTkScrollableFrame(self._sidebar, fg_color="transparent", label_text="")
-        self._playlist_frame.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        # Add files button
+        btn_frame = ctk.CTkFrame(self._sidebar, fg_color="transparent")
+        btn_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+        
+        self._add_btn = ctk.CTkButton(btn_frame, text="+ Add Files", fg_color=self._accent, hover_color=self._accent_hover, text_color=BG_DARK, font=("Segoe UI Semibold", 13), height=36, command=self._add_files)
+        self._add_btn.pack(fill="x", pady=(0, 8))
         
         # Shortcuts hint
-        hint = ctk.CTkLabel(self._sidebar, text="Space: Play/Pause  |  ←→: Prev/Next", text_color=TEXT_MUTED, font=("Segoe UI", 9))
-        hint.grid(row=4, column=0, sticky="s", pady=(0, 12))
+        hint_frame = ctk.CTkFrame(btn_frame, fg_color="transparent")
+        hint_frame.pack(fill="x")
+        ctk.CTkLabel(hint_frame, text="Space: Play  S: Shuffle  L: Loop", text_color=TEXT_MUTED, font=("Segoe UI", 9)).pack(anchor="w", padx=4)
+        
+        ctk.CTkLabel(btn_frame, text="PLAYLIST", text_color=TEXT_MUTED, font=("Segoe UI", 10)).pack(anchor="w", padx=8, pady=(8, 0))
+        
+        # Playlist area
+        playlist_container = ctk.CTkFrame(self._sidebar, fg_color=BG_LIGHT, corner_radius=8)
+        playlist_container.grid(row=3, column=0, sticky="nsew", padx=12, pady=(4, 12))
+        playlist_container.grid_columnconfigure(0, weight=1)
+        playlist_container.grid_rowconfigure(0, weight=1)
+        
+        # Scrollable playlist
+        self._playlist_frame = ctk.CTkScrollableFrame(playlist_container, fg_color="transparent")
+        self._playlist_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self._playlist_frame.grid_columnconfigure(0, weight=1)
+        
+        self._playlist_buttons: list[ctk.CTkButton] = []
 
         # === Main Content ===
         main = ctk.CTkFrame(self, fg_color=BG_DARK, corner_radius=0)
@@ -198,15 +239,13 @@ class MainWindow(ctk.CTk):
         self.artist_label = ctk.CTkLabel(header, text="Add files to get started", text_color=TEXT_DIM, font=("Segoe UI", 14))
         self.artist_label.pack(anchor="w")
 
-        # === Album Art / Placeholder Area ===
-        self._art_container = ctk.CTkFrame(main, fg_color=BG, corner_radius=16)
-        self._art_container.grid(row=1, column=0, sticky="nsew", padx=32, pady=(8, 24))
-        self._art_container.grid_columnconfigure(0, weight=1)
-        self._art_container.grid_rowconfigure(0, weight=1)
-        
-        # Placeholder with music note
-        self._art_label = ctk.CTkLabel(self._art_container, text="♪", text_color=TEXT_MUTED, font=("Segoe UI", 120))
-        self._art_label.grid(row=0, column=0)
+        # === Visualization Area ===
+        self._viz_container = ctk.CTkFrame(main, fg_color=BG, corner_radius=16)
+        self._viz_container.grid(row=1, column=0, sticky="nsew", padx=32, pady=(8, 24))
+        self._viz_container.grid_columnconfigure(0, weight=1)
+        self._viz_container.grid_rowconfigure(0, weight=1)
+
+        self._create_visualizer()
 
         # === Bottom Now Playing Bar ===
         now_playing = ctk.CTkFrame(self, fg_color=BG_LIGHT, height=130, corner_radius=0)
@@ -233,46 +272,48 @@ class MainWindow(ctk.CTk):
         center.grid_columnconfigure(0, weight=1)
         
         # Buttons row
-        btn_row = ctk.CTkFrame(center, fg_color="transparent")
-        btn_row.grid(row=0, column=0)
+        btns = ctk.CTkFrame(center, fg_color="transparent")
+        btns.grid(row=0, column=0, sticky="s", pady=(0, 8))
         
-        self.btn_shuffle = ctk.CTkButton(btn_row, text="🔀", width=40, height=40, fg_color="transparent", hover_color=CARD, text_color=TEXT_MUTED, font=("Segoe UI", 16), command=self._toggle_shuffle)
+        # Shuffle button
+        self.btn_shuffle = ctk.CTkButton(btns, text="🔀", width=40, height=40, fg_color="transparent", hover_color=CARD, text_color=TEXT_MUTED, font=("Segoe UI", 16), command=self._toggle_shuffle)
         self.btn_shuffle.pack(side="left", padx=4)
         
-        self.btn_prev = ctk.CTkButton(btn_row, text="⏮", width=48, height=48, fg_color="transparent", hover_color=CARD, text_color=self._accent, font=("Segoe UI", 22), command=self._prev_track)
-        self.btn_prev.pack(side="left", padx=4)
+        self.btn_prev = ctk.CTkButton(btns, text="⏮", width=44, height=44, fg_color="transparent", hover_color=CARD, text_color=self._accent, font=("Segoe UI", 20), command=self._prev_track)
+        self.btn_prev.pack(side="left", padx=8)
         
-        self.btn_play = ctk.CTkButton(btn_row, text="▶", width=56, height=56, fg_color=self._accent, hover_color=self._accent_hover, text_color=BG_DARK, font=("Segoe UI", 24), corner_radius=28, command=self._toggle_play)
-        self.btn_play.pack(side="left", padx=8)
+        self.btn_play = ctk.CTkButton(btns, text="▶", width=56, height=56, fg_color=self._accent, hover_color=self._accent_hover, text_color=BG_DARK, font=("Segoe UI", 22), corner_radius=28, command=self._toggle_play)
+        self.btn_play.pack(side="left", padx=14)
         
-        self.btn_next = ctk.CTkButton(btn_row, text="⏭", width=48, height=48, fg_color="transparent", hover_color=CARD, text_color=self._accent, font=("Segoe UI", 22), command=self._next_track)
-        self.btn_next.pack(side="left", padx=4)
+        self.btn_next = ctk.CTkButton(btns, text="⏭", width=44, height=44, fg_color="transparent", hover_color=CARD, text_color=self._accent, font=("Segoe UI", 20), command=self._next_track)
+        self.btn_next.pack(side="left", padx=8)
         
-        self.btn_loop = ctk.CTkButton(btn_row, text="🔁", width=40, height=40, fg_color="transparent", hover_color=CARD, text_color=TEXT_MUTED, font=("Segoe UI", 16), command=self._toggle_loop)
+        # Loop button
+        self.btn_loop = ctk.CTkButton(btns, text="🔁", width=40, height=40, fg_color="transparent", hover_color=CARD, text_color=TEXT_MUTED, font=("Segoe UI", 16), command=self._toggle_loop)
         self.btn_loop.pack(side="left", padx=4)
-
-        # Progress bar row
-        prog_row = ctk.CTkFrame(center, fg_color="transparent")
-        prog_row.grid(row=1, column=0, sticky="ew", padx=60, pady=(8, 16))
-        prog_row.grid_columnconfigure(1, weight=1)
         
-        self.lbl_time_current = ctk.CTkLabel(prog_row, text="0:00", text_color=TEXT_MUTED, font=("Segoe UI", 11), width=45)
-        self.lbl_time_current.grid(row=0, column=0, sticky="w")
+        # Progress row
+        progress_frame = ctk.CTkFrame(center, fg_color="transparent")
+        progress_frame.grid(row=1, column=0, sticky="sew", padx=10, pady=(0, 16))
+        progress_frame.grid_columnconfigure(1, weight=1)
         
-        self.slider = ctk.CTkSlider(prog_row, from_=0, to=1, number_of_steps=1000, height=6, button_length=14, button_color=TEXT, button_hover_color=self._accent, progress_color=TEXT_DIM, fg_color=CARD, command=self._on_slider)
-        self.slider.grid(row=0, column=1, sticky="ew", padx=12)
+        self.lbl_time_current = ctk.CTkLabel(progress_frame, text="0:00", text_color=TEXT_DIM, font=("Segoe UI", 11), width=50)
+        self.lbl_time_current.grid(row=0, column=0, padx=(0, 10))
+        
+        self.slider = ctk.CTkSlider(progress_frame, from_=0, to=1, number_of_steps=1000, height=6, button_length=14, button_color=TEXT, button_hover_color=self._accent, progress_color=TEXT, fg_color=CARD, width=450, command=self._on_slider)
+        self.slider.grid(row=0, column=1, sticky="ew")
         self.slider.set(0)
         
-        self.lbl_time_total = ctk.CTkLabel(prog_row, text="0:00", text_color=TEXT_MUTED, font=("Segoe UI", 11), width=45)
-        self.lbl_time_total.grid(row=0, column=2, sticky="e")
+        self.lbl_time_total = ctk.CTkLabel(progress_frame, text="0:00", text_color=TEXT_DIM, font=("Segoe UI", 11), width=50)
+        self.lbl_time_total.grid(row=0, column=2, padx=(10, 0))
 
         # Right: Volume
-        vol_frame = ctk.CTkFrame(now_playing, fg_color="transparent", width=180)
+        vol_frame = ctk.CTkFrame(now_playing, fg_color="transparent", width=200)
         vol_frame.grid(row=0, column=2, sticky="nse", padx=24, pady=24)
         vol_frame.grid_propagate(False)
         
         vol_inner = ctk.CTkFrame(vol_frame, fg_color="transparent")
-        vol_inner.pack(expand=True, anchor="center")
+        vol_inner.pack(expand=True, pady=30)
         
         self.vol_label = ctk.CTkLabel(vol_inner, text="🔊", text_color=TEXT_DIM, font=("Segoe UI", 16))
         self.vol_label.pack(side="left", padx=(0, 10))
@@ -282,21 +323,111 @@ class MainWindow(ctk.CTk):
         self.vol_slider.set(1.0)
         # Bind mouse wheel to volume slider
         self.vol_slider.bind("<MouseWheel>", self._on_vol_mousewheel)
-        self.vol_slider.bind("<Button-4>", lambda e: self._volume_up())
-        self.vol_slider.bind("<Button-5>", lambda e: self._volume_down())
+        self.vol_slider.bind("<Button-4>", lambda e: self._volume_up())  # Linux scroll up
+        self.vol_slider.bind("<Button-5>", lambda e: self._volume_down())  # Linux scroll down
+
+    def _create_visualizer(self) -> None:
+        """Create the matplotlib visualizer (2D or 3D based on settings)."""
+        # Clear existing
+        for widget in self._viz_container.winfo_children():
+            widget.destroy()
+        
+        self._viz_bars = VIZ_BARS_3D if self._viz_3d else VIZ_BARS_2D
+        self._display_heights = np.zeros(self._viz_bars, dtype=np.float32)
+        self._peak_heights = np.zeros(self._viz_bars, dtype=np.float32)
+        self._peak_decay = np.zeros(self._viz_bars, dtype=np.float32)
+        
+        if self._viz_3d:
+            self._fig = Figure(figsize=(10, 5), facecolor=BG, dpi=60)
+            self._ax = self._fig.add_subplot(111, projection='3d')
+        else:
+            self._fig = Figure(figsize=(10, 4), facecolor=BG, dpi=80)
+            self._ax = self._fig.add_subplot(111)
+        
+        self._setup_visualizer()
+        
+        viz_frame = tk.Frame(self._viz_container, bg=BG)
+        viz_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self._canvas = FigureCanvasTkAgg(self._fig, master=viz_frame)
+        self._canvas.draw()
+        self._canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def _setup_visualizer(self) -> None:
+        """Configure the visualizer based on mode."""
+        self._ax.clear()
+        self._ax.set_facecolor(BG)
+        self._fig.patch.set_facecolor(BG)
+        self._update_colormap()
+        
+        if self._viz_3d:
+            # 3D setup
+            self._ax.set_axis_off()
+            self._ax.xaxis.pane.fill = False
+            self._ax.yaxis.pane.fill = False
+            self._ax.zaxis.pane.fill = False
+            self._ax.xaxis.pane.set_edgecolor('none')
+            self._ax.yaxis.pane.set_edgecolor('none')
+            self._ax.zaxis.pane.set_edgecolor('none')
+            self._ax.view_init(elev=self._view_elev, azim=self._view_azim)
+            self._ax.set_xlim(-1, self._viz_bars + 1)
+            self._ax.set_ylim(-0.5, 1.5)
+            self._ax.set_zlim(-0.25, 1.1)
+        else:
+            # 2D setup
+            self._ax.set_xlim(-0.5, self._viz_bars - 0.5)
+            self._ax.set_ylim(-0.25, 1.15)
+            self._ax.axis("off")
+            
+            # Main bars
+            self._bars = self._ax.bar(
+                range(self._viz_bars), [0.01] * self._viz_bars, 
+                width=0.8, color=[self._cmap(0.3)] * self._viz_bars,
+                edgecolor='none'
+            )
+            
+            # Reflection bars
+            self._reflections = self._ax.bar(
+                range(self._viz_bars), [0.01] * self._viz_bars,
+                width=0.8, color=[(*to_rgb(self._cmap(0.3)), 0.2)] * self._viz_bars,
+                edgecolor='none', bottom=[-0.01] * self._viz_bars
+            )
+            
+            # Peak indicators
+            self._peaks = self._ax.bar(
+                range(self._viz_bars), [0.015] * self._viz_bars,
+                width=0.8, color='#ffffff', alpha=0.9,
+                edgecolor='none', bottom=[0] * self._viz_bars
+            )
+        
+        self._fig.tight_layout(pad=0)
+
+    def _update_colormap(self) -> None:
+        """Create colormap from accent color."""
+        try:
+            r, g, b = to_rgb(self._accent)
+            colors = [
+                (r * 0.3, g * 0.3, b * 0.3),
+                (r * 0.6, g * 0.6, b * 0.6),
+                self._accent,
+                (min(1, r * 1.3), min(1, g * 1.3), min(1, b * 1.3)),
+                (min(1, r * 1.5 + 0.2), min(1, g * 1.5 + 0.2), min(1, b * 1.5 + 0.2)),
+            ]
+            self._cmap = LinearSegmentedColormap.from_list('accent', colors)
+        except Exception:
+            self._cmap = LinearSegmentedColormap.from_list('default', ['#004400', '#00ff00', '#ffff00'])
 
     def _open_settings(self) -> None:
         """Open settings dialog."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Settings")
-        dialog.geometry("400x200")
+        dialog.geometry("400x280")
         dialog.transient(self)
         dialog.grab_set()
         dialog.configure(fg_color=BG_DARK)
         
         dialog.update_idletasks()
         x = self.winfo_x() + (self.winfo_width() - 400) // 2
-        y = self.winfo_y() + (self.winfo_height() - 200) // 2
+        y = self.winfo_y() + (self.winfo_height() - 280) // 2
         dialog.geometry(f"+{x}+{y}")
         
         ctk.CTkLabel(dialog, text="Settings", text_color=TEXT, font=("Segoe UI Semibold", 20)).pack(pady=(24, 16))
@@ -318,8 +449,41 @@ class MainWindow(ctk.CTk):
         
         ctk.CTkButton(color_row, text="Change", fg_color=CARD, hover_color=CARD_HOVER, text_color=TEXT, font=("Segoe UI", 11), height=32, width=80, command=lambda: self._pick_color(dialog)).pack(side="right", padx=8)
         
+        # Visualizer mode section
+        viz_frame = ctk.CTkFrame(dialog, fg_color=BG_LIGHT, corner_radius=12)
+        viz_frame.pack(fill="x", padx=24, pady=8)
+        
+        viz_inner = ctk.CTkFrame(viz_frame, fg_color="transparent")
+        viz_inner.pack(fill="x", padx=16, pady=12)
+        
+        viz_row = ctk.CTkFrame(viz_inner, fg_color="transparent")
+        viz_row.pack(fill="x")
+        
+        ctk.CTkLabel(viz_row, text="Visualizer Mode", text_color=TEXT, font=("Segoe UI", 13)).pack(side="left")
+        
+        self._viz_switch = ctk.CTkSwitch(viz_row, text="3D", onvalue=True, offvalue=False, command=lambda: self._toggle_viz_mode(dialog), fg_color=CARD, progress_color=self._accent, button_color=TEXT)
+        self._viz_switch.pack(side="right")
+        if self._viz_3d:
+            self._viz_switch.select()
+        
+        ctk.CTkLabel(viz_inner, text="2D mode is faster, 3D mode looks better", text_color=TEXT_MUTED, font=("Segoe UI", 10)).pack(anchor="w", pady=(4, 0))
+        
         # Close button
         ctk.CTkButton(dialog, text="Close", fg_color=CARD, hover_color=CARD_HOVER, text_color=TEXT, font=("Segoe UI", 13), height=40, width=120, command=dialog.destroy).pack(pady=20)
+
+    def _toggle_viz_mode(self, dialog: ctk.CTkToplevel | None = None) -> None:
+        """Toggle between 2D and 3D visualizer."""
+        self._viz_3d = not self._viz_3d
+        self._settings["viz_3d"] = self._viz_3d
+        save_settings(self._settings)
+        
+        # Stop current viz and recreate
+        self._stop_visualizer()
+        self._create_visualizer()
+        
+        # Restart if playing
+        if self.audio.is_playing():
+            self._start_viz()
 
     def _pick_color(self, dialog: ctk.CTkToplevel) -> None:
         """Open color picker."""
@@ -348,6 +512,8 @@ class MainWindow(ctk.CTk):
             self.btn_shuffle.configure(text_color=self._accent)
         if self._loop:
             self.btn_loop.configure(text_color=self._accent)
+        
+        self._update_colormap()
         
         if dialog and hasattr(self, '_color_preview'):
             self._color_preview.configure(fg_color=color)
@@ -381,6 +547,7 @@ class MainWindow(ctk.CTk):
             return
         self._shuffle_order = list(range(len(self._playlist)))
         random.shuffle(self._shuffle_order)
+        # Move current track to front if playing
         if self._playlist_index >= 0 and self._playlist_index in self._shuffle_order:
             self._shuffle_order.remove(self._playlist_index)
             self._shuffle_order.insert(0, self._playlist_index)
@@ -430,44 +597,72 @@ class MainWindow(ctk.CTk):
     def _add_files(self) -> None:
         paths = filedialog.askopenfilenames(
             title="Add audio files",
-            filetypes=[("Audio files", "*.wav *.flac *.ogg"), ("All files", "*.*")]
+            filetypes=[
+                ("Audio Files", "*.wav *.flac *.ogg"),
+                ("WAV", "*.wav"),
+                ("FLAC", "*.flac"),
+                ("OGG", "*.ogg"),
+                ("All Files", "*.*"),
+            ],
         )
-        if paths:
-            for p in paths:
-                path = Path(p)
-                if path not in self._playlist:
-                    self._playlist.append(path)
-            self._refresh_playlist_ui()
-            if self._shuffle:
-                self._generate_shuffle_order()
+        for p in paths:
+            path = Path(p)
+            if path not in self._playlist:
+                self._playlist.append(path)
+        self._refresh_playlist_ui()
+        
+        if self._playlist_index < 0 and self._playlist:
+            self._select_track(0)
+        
+        if self._shuffle:
+            self._generate_shuffle_order()
+        
         self.focus_set()
 
     def _refresh_playlist_ui(self) -> None:
-        for widget in self._playlist_frame.winfo_children():
-            widget.destroy()
+        for btn in self._playlist_buttons:
+            btn.destroy()
+        self._playlist_buttons.clear()
         
         for i, path in enumerate(self._playlist):
-            is_selected = i == self._playlist_index
-            fg = self._accent if is_selected else "transparent"
-            hover = self._accent_hover if is_selected else CARD_HOVER
-            text_color = BG_DARK if is_selected else TEXT
-            
-            btn = ctk.CTkButton(self._playlist_frame, text=path.stem, fg_color=fg, hover_color=hover, text_color=text_color, font=("Segoe UI", 12), height=36, anchor="w", corner_radius=8, command=lambda idx=i: self._select_track(idx))
-            btn.pack(fill="x", pady=1)
+            is_current = (i == self._playlist_index)
+            btn = ctk.CTkButton(
+                self._playlist_frame,
+                text=path.stem,
+                fg_color=CARD if is_current else "transparent",
+                hover_color=CARD_HOVER,
+                text_color=self._accent if is_current else TEXT,
+                font=("Segoe UI", 12),
+                height=36,
+                anchor="w",
+                command=lambda idx=i: self._select_track(idx)
+            )
+            btn.grid(row=i, column=0, sticky="ew", pady=2)
+            self._playlist_buttons.append(btn)
 
-    def _select_track(self, index: int, auto_play: bool = True) -> None:
-        if 0 <= index < len(self._playlist):
-            # Stop current playback
+    def _stop_visualizer(self) -> None:
+        """Stop the visualization loop."""
+        if self._viz_job:
+            self.after_cancel(self._viz_job)
+            self._viz_job = None
+
+    def _select_track(self, idx: int, auto_play: bool = False) -> None:
+        if 0 <= idx < len(self._playlist):
+            self._stop_visualizer()
             self.audio.stop()
             
-            self._playlist_index = index
-            path = self._playlist[index]
-            
-            if self.audio.open(path):
+            self._playlist_index = idx
+            path = self._playlist[idx]
+            if self.audio.open(str(path)):
                 self._current_file = str(path)
                 self.track_label.configure(text=path.stem)
                 self.np_title.configure(text=path.stem)
-                self.np_artist.configure(text=path.suffix.upper()[1:])
+                self.np_artist.configure(text=path.suffix.upper()[1:] + " Audio")
+                
+                self.viz = Visualizer(fft_size=FFT_SIZE)
+                self._display_heights.fill(0)
+                self._peak_heights.fill(0)
+                self._peak_decay.fill(0)
                 self._update_position_display()
                 self._refresh_playlist_ui()
                 
@@ -475,6 +670,7 @@ class MainWindow(ctk.CTk):
                     self.audio.play()
                     self.btn_play.configure(text="⏸")
                     self.artist_label.configure(text="Now Playing")
+                    self._start_viz()
                 else:
                     self.artist_label.configure(text="Ready to play")
         
@@ -503,6 +699,7 @@ class MainWindow(ctk.CTk):
             self.audio.play()
             self.btn_play.configure(text="⏸")
             self.artist_label.configure(text="Now Playing")
+            self._start_viz()
 
     def _on_slider(self, v: float) -> None:
         if self._updating_slider:
@@ -546,6 +743,97 @@ class MainWindow(ctk.CTk):
                 self.slider.set(cur / dur)
             finally:
                 self._updating_slider = False
+
+    def _start_viz(self) -> None:
+        if self._viz_job:
+            self.after_cancel(self._viz_job)
+        self._tick_viz()
+
+    def _tick_viz(self) -> None:
+        try:
+            chunk = self.audio.get_pcm_chunk(CHUNK_LEN)
+            if chunk is not None and len(chunk) >= FFT_SIZE:
+                self.viz.push(chunk)
+            
+            target = self.viz.get_magnitudes(self._viz_bars)
+            
+            # Smooth animation
+            attack = 0.5
+            decay = 0.92
+            for i in range(self._viz_bars):
+                if target[i] > self._display_heights[i]:
+                    self._display_heights[i] = attack * target[i] + (1 - attack) * self._display_heights[i]
+                else:
+                    self._display_heights[i] = decay * self._display_heights[i]
+                
+                if self._display_heights[i] > self._peak_heights[i]:
+                    self._peak_heights[i] = self._display_heights[i]
+                    self._peak_decay[i] = 0
+                else:
+                    self._peak_decay[i] += 0.008
+                    self._peak_heights[i] = max(0, self._peak_heights[i] - self._peak_decay[i])
+            
+            if self._viz_3d:
+                self._draw_3d()
+            else:
+                self._draw_2d()
+            
+            self._canvas.draw_idle()
+        except Exception:
+            pass  # Ignore errors during resize/move
+        
+        if self.audio.is_playing():
+            update_ms = VIZ_UPDATE_MS_3D if self._viz_3d else VIZ_UPDATE_MS_2D
+            self._viz_job = self.after(update_ms, self._tick_viz)
+        else:
+            self._viz_job = None
+
+    def _draw_3d(self) -> None:
+        """Draw optimized 3D visualization while preserving user rotation."""
+        # Save current view angle before clearing
+        self._view_elev = self._ax.elev
+        self._view_azim = self._ax.azim
+        
+        self._ax.clear()
+        self._ax.set_facecolor(BG)
+        self._ax.set_axis_off()
+        
+        # Restore view angle (preserves user rotation)
+        self._ax.view_init(elev=self._view_elev, azim=self._view_azim)
+        self._ax.set_xlim(-1, self._viz_bars + 1)
+        self._ax.set_ylim(-0.5, 1.5)
+        self._ax.set_zlim(-0.25, 1.1)
+        
+        for i in range(self._viz_bars):
+            h = max(0.03, self._display_heights[i])
+            color = self._cmap(min(1.0, h * 1.3))
+            
+            # Main bar
+            self._ax.bar3d(i, 0, 0, 0.85, 0.6, h, color=color, alpha=0.95, shade=True, edgecolor='none')
+            
+            # Reflection/shadow (mirrored below, faded)
+            ref_h = h * 0.3
+            ref_color = to_rgb(color)
+            self._ax.bar3d(i, 0, -ref_h - 0.02, 0.85, 0.6, ref_h, color=(*ref_color, 0.18), shade=False, edgecolor='none')
+
+    def _draw_2d(self) -> None:
+        """Draw fast 2D visualization."""
+        for i, (bar, ref_bar, peak_bar, h, ph) in enumerate(
+            zip(self._bars, self._reflections, self._peaks, self._display_heights, self._peak_heights)
+        ):
+            h_val = max(0.02, h)
+            color = self._cmap(min(1.0, h * 1.3))
+            
+            bar.set_height(h_val)
+            bar.set_color(color)
+            
+            ref_h = h_val * 0.3
+            ref_bar.set_height(ref_h)
+            ref_bar.set_y(-ref_h - 0.01)
+            ref_color = to_rgb(color)
+            ref_bar.set_color((*ref_color, 0.2))
+            
+            peak_bar.set_y(ph)
 
 
 def _fmt(sec: float) -> str:
