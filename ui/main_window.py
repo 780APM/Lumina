@@ -44,6 +44,7 @@ SETTINGS_FILE = Path(__file__).resolve().parent.parent / "settings.json"
 
 FFT_SIZE = 2048
 VIZ_BARS_2D = 48
+VIZ_BARS_CIRCULAR = 72
 VIZ_BARS_3D = 20  # Fewer bars for 3D performance
 VIZ_UPDATE_MS_2D = 16  # ~60fps for 2D
 VIZ_UPDATE_MS_3D = 16  # ~60fps for 3D
@@ -117,7 +118,7 @@ def load_settings() -> dict:
             return json.loads(SETTINGS_FILE.read_text())
         except Exception:
             pass
-    return {"accent": DEFAULT_ACCENT, "viz_3d": False}
+    return {"accent": DEFAULT_ACCENT, "viz_3d": False, "viz_circular": False}
 
 
 def save_settings(settings: dict) -> None:
@@ -141,6 +142,9 @@ class MainWindow(ctk.CTk):
         self._accent = self._settings.get("accent", DEFAULT_ACCENT)
         self._accent_hover = self._lighten_color(self._accent, 0.15)
         self._viz_3d = self._settings.get("viz_3d", False)
+        self._viz_circular = self._settings.get("viz_circular", False)
+        if self._viz_3d and self._viz_circular:
+            self._viz_circular = False
 
         self.audio = AudioEngine()
         self.viz = Visualizer(fft_size=FFT_SIZE)
@@ -162,7 +166,7 @@ class MainWindow(ctk.CTk):
         self._track_end_handled = False
         
         # Smooth animation state
-        self._viz_bars = VIZ_BARS_3D if self._viz_3d else VIZ_BARS_2D
+        self._viz_bars = self._current_viz_bars()
         self._display_heights = np.zeros(self._viz_bars, dtype=np.float32)
         self._peak_heights = np.zeros(self._viz_bars, dtype=np.float32)
         self._peak_decay = np.zeros(self._viz_bars, dtype=np.float32)
@@ -253,6 +257,13 @@ class MainWindow(ctk.CTk):
             self.vol_label.configure(text="🔉")
         else:
             self.vol_label.configure(text="🔊")
+
+    def _current_viz_bars(self) -> int:
+        if self._viz_circular:
+            return VIZ_BARS_CIRCULAR
+        if self._viz_3d:
+            return VIZ_BARS_3D
+        return VIZ_BARS_2D
 
     def _set_status(self, text: str, error: bool = False) -> None:
         self.status_label.configure(text=text, text_color="#ff8a8a" if error else TEXT_MUTED)
@@ -504,12 +515,15 @@ class MainWindow(ctk.CTk):
         for widget in self._viz_container.winfo_children():
             widget.destroy()
         
-        self._viz_bars = VIZ_BARS_3D if self._viz_3d else VIZ_BARS_2D
+        self._viz_bars = self._current_viz_bars()
         self._display_heights = np.zeros(self._viz_bars, dtype=np.float32)
         self._peak_heights = np.zeros(self._viz_bars, dtype=np.float32)
         self._peak_decay = np.zeros(self._viz_bars, dtype=np.float32)
         
-        if self._viz_3d:
+        if self._viz_circular:
+            self._fig = Figure(figsize=(8, 5), facecolor=BG, dpi=80)
+            self._ax = self._fig.add_subplot(111, projection="polar")
+        elif self._viz_3d:
             self._fig = Figure(figsize=(10, 5), facecolor=BG, dpi=60)
             self._ax = self._fig.add_subplot(111, projection='3d')
         else:
@@ -531,7 +545,33 @@ class MainWindow(ctk.CTk):
         self._fig.patch.set_facecolor(BG)
         self._update_colormap()
         
-        if self._viz_3d:
+        if self._viz_circular:
+            self._ax.set_facecolor(BG)
+            self._ax.set_theta_zero_location("N")
+            self._ax.set_theta_direction(-1)
+            self._ax.set_ylim(0, 1.15)
+            self._ax.set_axis_off()
+            self._angles = np.linspace(0, 2 * np.pi, self._viz_bars, endpoint=False)
+            self._angle_width = (2 * np.pi / self._viz_bars) * 0.78
+            self._bars = self._ax.bar(
+                self._angles,
+                [0.02] * self._viz_bars,
+                width=self._angle_width,
+                bottom=0.34,
+                color=[self._cmap(0.35)] * self._viz_bars,
+                edgecolor="none",
+                alpha=0.95,
+            )
+            self._peaks = self._ax.bar(
+                self._angles,
+                [0.018] * self._viz_bars,
+                width=self._angle_width,
+                bottom=[0.36] * self._viz_bars,
+                color="#ffffff",
+                edgecolor="none",
+                alpha=0.9,
+            )
+        elif self._viz_3d:
             # 3D setup
             self._ax.set_axis_off()
             self._ax.xaxis.pane.fill = False
@@ -600,8 +640,8 @@ class MainWindow(ctk.CTk):
         self._settings_overlay = overlay
 
         panel = ctk.CTkFrame(overlay, fg_color=BG_DARK, corner_radius=8, border_width=1, border_color=CARD_HOVER)
-        panel.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.42, relheight=0.42)
-        panel.configure(width=480, height=340)
+        panel.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.44, relheight=0.52)
+        panel.configure(width=500, height=430)
         panel.grid_columnconfigure(0, weight=1)
         panel.grid_rowconfigure(1, weight=1)
 
@@ -635,6 +675,16 @@ class MainWindow(ctk.CTk):
             self._viz_switch.select()
         ctk.CTkLabel(viz_frame, text="2D mode is faster; 3D mode is more dimensional.", text_color=TEXT_MUTED, font=("Segoe UI", 10)).grid(row=1, column=0, columnspan=2, sticky="w", padx=16, pady=(4, 14))
 
+        circular_frame = ctk.CTkFrame(body, fg_color=BG_LIGHT, corner_radius=8)
+        circular_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        circular_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(circular_frame, text="Circular Visualizer", text_color=TEXT, font=("Segoe UI", 13)).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 0))
+        self._circular_switch = ctk.CTkSwitch(circular_frame, text="Round", onvalue=True, offvalue=False, command=self._toggle_circular_mode, fg_color=CARD, progress_color=self._accent, button_color=TEXT)
+        self._circular_switch.grid(row=0, column=1, sticky="e", padx=16, pady=(14, 0))
+        if self._viz_circular:
+            self._circular_switch.select()
+        ctk.CTkLabel(circular_frame, text="Wraps the spectrum around the cover-art space for a radial look.", text_color=TEXT_MUTED, font=("Segoe UI", 10)).grid(row=1, column=0, columnspan=2, sticky="w", padx=16, pady=(4, 14))
+
         footer = ctk.CTkFrame(panel, fg_color="transparent")
         footer.grid(row=2, column=0, sticky="ew", padx=22, pady=(8, 20))
         footer.grid_columnconfigure(0, weight=1)
@@ -650,7 +700,12 @@ class MainWindow(ctk.CTk):
     def _toggle_viz_mode(self, dialog=None) -> None:
         """Toggle between 2D and 3D visualizer."""
         self._viz_3d = not self._viz_3d
+        if self._viz_3d:
+            self._viz_circular = False
+            if hasattr(self, "_circular_switch"):
+                self._circular_switch.deselect()
         self._settings["viz_3d"] = self._viz_3d
+        self._settings["viz_circular"] = self._viz_circular
         save_settings(self._settings)
         
         # Stop current viz and recreate
@@ -658,6 +713,23 @@ class MainWindow(ctk.CTk):
         self._create_visualizer()
         
         # Restart if playing
+        if self.audio.is_playing():
+            self._start_viz()
+
+    def _toggle_circular_mode(self) -> None:
+        """Toggle circular visualizer mode."""
+        self._viz_circular = not self._viz_circular
+        if self._viz_circular:
+            self._viz_3d = False
+            if hasattr(self, "_viz_switch"):
+                self._viz_switch.deselect()
+        self._settings["viz_circular"] = self._viz_circular
+        self._settings["viz_3d"] = self._viz_3d
+        save_settings(self._settings)
+
+        self._stop_visualizer()
+        self._create_visualizer()
+
         if self.audio.is_playing():
             self._start_viz()
 
@@ -682,6 +754,10 @@ class MainWindow(ctk.CTk):
         self.btn_play.configure(fg_color=self._accent, hover_color=self._accent_hover)
         self.btn_prev.configure(text_color=self._accent)
         self.btn_next.configure(text_color=self._accent)
+        if hasattr(self, "_viz_switch"):
+            self._viz_switch.configure(progress_color=self._accent)
+        if hasattr(self, "_circular_switch"):
+            self._circular_switch.configure(progress_color=self._accent)
         self._sync_transport_toggles()
         
         self._update_colormap()
@@ -1056,7 +1132,9 @@ class MainWindow(ctk.CTk):
                     self._peak_decay[i] += 0.008
                     self._peak_heights[i] = max(0, self._peak_heights[i] - self._peak_decay[i])
             
-            if self._viz_3d:
+            if self._viz_circular:
+                self._draw_circular()
+            elif self._viz_3d:
                 self._draw_3d()
             else:
                 self._draw_2d()
@@ -1070,6 +1148,22 @@ class MainWindow(ctk.CTk):
             self._viz_job = self.after(update_ms, self._tick_viz)
         else:
             self._viz_job = None
+
+    def _draw_circular(self) -> None:
+        """Draw radial 2D visualization."""
+        inner_radius = 0.34
+        max_height = 0.72
+        for bar, peak_bar, h, ph in zip(self._bars, self._peaks, self._display_heights, self._peak_heights):
+            h_val = max(0.025, min(max_height, h * max_height))
+            peak_radius = inner_radius + max(0.03, min(max_height, ph * max_height))
+            color = self._cmap(min(1.0, h * 1.3))
+
+            bar.set_height(h_val)
+            bar.set_color(color)
+            bar.set_alpha(0.95)
+
+            peak_bar.set_y(peak_radius)
+            peak_bar.set_height(0.016)
 
     def _draw_3d(self) -> None:
         """Draw optimized 3D visualization while preserving user rotation."""
