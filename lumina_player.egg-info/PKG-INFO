@@ -1,0 +1,55 @@
+Metadata-Version: 2.4
+Name: lumina-player
+Version: 0.1.0
+Summary: A Spotify-like local audio player and visualizer.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: customtkinter>=5.2
+Requires-Dist: matplotlib>=3.8
+Requires-Dist: miniaudio>=1.60
+Requires-Dist: mutagen>=1.47
+Requires-Dist: numpy>=1.26
+Requires-Dist: Pillow>=10.0
+Requires-Dist: pyinstaller>=6.0
+
+# Lumina
+
+Lumina is a local desktop audio player with a Spotify-like layout and reactive visualizer.
+
+## Development
+
+Create an environment and install the app in editable mode:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+```
+
+Run the app:
+
+```bash
+lumina
+```
+
+After installation, the package can also be run with:
+
+```bash
+python -m Lumina
+```
+
+From this source folder without installing, use:
+
+```bash
+python __main__.py
+```
+
+## Packaging
+
+Build a one-folder executable with PyInstaller:
+
+```bash
+pyinstaller lumina.spec
+```
+
+The app uses CustomTkinter, Tk, matplotlib, miniaudio, mutagen, Pillow, and numpy. If a platform-specific build misses a runtime asset, rebuild from the activated environment where those packages are installed.

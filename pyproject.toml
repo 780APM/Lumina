@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lumina-player"
+version = "0.1.0"
+description = "A Spotify-like local audio player and visualizer."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "customtkinter>=5.2",
+    "matplotlib>=3.8",
+    "miniaudio>=1.60",
+    "mutagen>=1.47",
+    "numpy>=1.26",
+    "Pillow>=10.0",
+    "pyinstaller>=6.0",
+]
+
+[project.scripts]
+lumina = "Lumina.ui.main_window:run"
+
+[tool.setuptools]
+packages = ["Lumina", "Lumina.ui"]
+
+[tool.setuptools.package-dir]
+Lumina = "."
+"Lumina.ui" = "ui"
