@@ -1,2 +1,0 @@
-[console_scripts]
-lumina = Lumina.ui.main_window:run

@@ -1,7 +1,0 @@
-customtkinter>=5.2
-matplotlib>=3.8
-miniaudio>=1.60
-mutagen>=1.47
-numpy>=1.26
-Pillow>=10.0
-pyinstaller>=6.0
