@@ -57,6 +57,11 @@ python -m unittest discover -v
 The decoder currently loads each selected track into memory, so very large
 files use memory proportional to their decoded PCM size.
 
+Lumina preloads nearby tracks into a small bounded cache to make next/previous
+navigation responsive. When embedded artwork is unavailable, it checks for
+common sidecar files such as `cover.jpg` and then generates identity artwork
+from the inferred artist and title.
+
 ## License
 
 Lumina is available under the [MIT License](LICENSE).

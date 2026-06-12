@@ -55,9 +55,12 @@ class FakePlaybackDevice:
 
 
 DECODED = FakeDecoded(np.zeros(2, dtype=np.float32))
+DECODE_CALLS = 0
 
 
 def fake_decode_file(path, *, output_format, nchannels):
+    global DECODE_CALLS
+    DECODE_CALLS += 1
     del path
     assert output_format == FakeSampleFormat.FLOAT32
     assert nchannels == 2
@@ -76,8 +79,9 @@ from audio_engine import AudioEngine
 
 class AudioEngineTests(unittest.TestCase):
     def setUp(self) -> None:
-        global DECODED
+        global DECODED, DECODE_CALLS
         DECODED = FakeDecoded(np.zeros(2, dtype=np.float32))
+        DECODE_CALLS = 0
         FakePlaybackDevice.instances.clear()
         FakePlaybackDevice.fail_start = False
         handle = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
@@ -115,6 +119,7 @@ class AudioEngineTests(unittest.TestCase):
         global DECODED
         engine = AudioEngine()
         self.assertTrue(engine.open(self.path))
+        engine.clear_cache()
         DECODED = FakeDecoded(np.array([], dtype=np.float32))
 
         self.assertFalse(engine.open(self.path))
@@ -135,6 +140,19 @@ class AudioEngineTests(unittest.TestCase):
         self.assertTrue(engine.open(self.path))
         self.assertIsNone(engine.get_pcm_chunk(0))
         self.assertIsNone(engine.get_pcm_chunk(-1))
+
+    def test_preload_keeps_playback_unchanged_and_open_reuses_cache(self) -> None:
+        global DECODE_CALLS
+        engine = AudioEngine()
+
+        self.assertTrue(engine.preload(self.path).ok)
+        self.assertIsNone(engine.current_path())
+        self.assertTrue(engine.is_cached(self.path))
+        self.assertEqual(DECODE_CALLS, 1)
+
+        self.assertTrue(engine.open(self.path))
+        self.assertEqual(engine.current_path(), self.path.resolve())
+        self.assertEqual(DECODE_CALLS, 1)
 
 
 if __name__ == "__main__":
