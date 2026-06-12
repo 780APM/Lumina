@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import queue
 import random
+import threading
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -12,7 +15,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from mutagen import File as MutagenFile
 import matplotlib
 matplotlib.use("TkAgg")
@@ -51,6 +54,7 @@ VIZ_UPDATE_MS_2D = 16  # ~60fps for 2D
 VIZ_UPDATE_MS_3D = 33  # ~30fps; Matplotlib 3D redraws are expensive
 CHUNK_LEN = FFT_SIZE
 POSITION_UPDATE_MS = 150
+MARQUEE_UPDATE_MS = 140
 
 
 @dataclass
@@ -111,6 +115,65 @@ class Tooltip:
         if self._job:
             self.widget.after_cancel(self._job)
             self._job = None
+
+
+class MarqueeLabel(ctk.CTkLabel):
+    """A label that scrolls long text while leaving short text stationary."""
+
+    def __init__(self, *args, characters: int = 32, **kwargs) -> None:
+        text = str(kwargs.pop("text", ""))
+        super().__init__(*args, text="", **kwargs)
+        self._characters = max(8, characters)
+        self._full_text = ""
+        self._offset = 0
+        self._pause_ticks = 0
+        self._job: str | None = None
+        self.bind("<Destroy>", self._on_destroy, add="+")
+        self.set_text(text)
+
+    def set_text(self, text: str) -> None:
+        self._full_text = str(text)
+        self._offset = 0
+        self._pause_ticks = 12
+        self._cancel()
+        self._render()
+        if len(self._full_text) > self._characters:
+            self._job = self.after(MARQUEE_UPDATE_MS, self._tick)
+
+    def _render(self) -> None:
+        if len(self._full_text) <= self._characters:
+            self.configure(text=self._full_text)
+            return
+        sequence = self._full_text + "     "
+        repeated = sequence + sequence
+        self.configure(
+            text=repeated[self._offset : self._offset + self._characters]
+        )
+
+    def _tick(self) -> None:
+        self._job = None
+        if self._pause_ticks > 0:
+            self._pause_ticks -= 1
+        else:
+            sequence_length = len(self._full_text) + 5
+            self._offset = (self._offset + 1) % sequence_length
+            if self._offset == 0:
+                self._pause_ticks = 12
+            self._render()
+        self._job = self.after(MARQUEE_UPDATE_MS, self._tick)
+
+    def _cancel(self) -> None:
+        if self._job:
+            try:
+                self.after_cancel(self._job)
+            except tk.TclError:
+                pass
+            self._job = None
+
+    def _on_destroy(self, _event=None) -> None:
+        self._cancel()
+
+
 class MainWindow(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
@@ -148,6 +211,9 @@ class MainWindow(ctk.CTk):
         self._shuffle_order: list[int] = []
         self._cover_image: ctk.CTkImage | None = None
         self._track_end_handled = False
+        self._track_load_generation = 0
+        self._track_load_results: queue.Queue[tuple] = queue.Queue()
+        self._closing = False
         
         # Smooth animation state
         self._viz_bars = self._current_viz_bars()
@@ -192,6 +258,8 @@ class MainWindow(ctk.CTk):
         self.focus_set()
 
     def _on_close(self) -> None:
+        self._closing = True
+        self._track_load_generation += 1
         self._stop_visualizer()
         if self._position_job:
             self.after_cancel(self._position_job)
@@ -260,8 +328,9 @@ class MainWindow(ctk.CTk):
         if path in self._track_info:
             return self._track_info[path]
 
-        title = path.stem
-        artist = f"{path.suffix.upper()[1:] or 'Audio'} Audio"
+        inferred_title, inferred_artist = _infer_track_fields(path)
+        title = inferred_title
+        artist = inferred_artist or f"{path.suffix.upper()[1:] or 'Audio'} Audio"
         album = ""
         duration: float | None = None
         cover_data: bytes | None = None
@@ -272,25 +341,31 @@ class MainWindow(ctk.CTk):
                 if audio.info and getattr(audio.info, "length", None):
                     duration = float(audio.info.length)
                 tags = audio.tags
-                title = _first_tag(tags, "TIT2", "title") or title
-                artist = _first_tag(tags, "TPE1", "artist", "\xa9ART") or artist
+                title = _first_tag(tags, "TIT2", "title") or inferred_title
+                artist = (
+                    _first_tag(tags, "TPE1", "artist", "\xa9ART")
+                    or inferred_artist
+                    or artist
+                )
                 album = _first_tag(tags, "TALB", "album", "\xa9alb") or album
                 cover_data = _cover_from_tags(tags)
                 if cover_data is None and getattr(audio, "pictures", None):
                     cover_data = bytes(audio.pictures[0].data)
         except Exception:
             pass
+        if cover_data is None:
+            cover_data = _sidecar_cover(path)
 
         info = TrackInfo(path=path, title=title, artist=artist, album=album, duration=duration, cover_data=cover_data)
         self._track_info[path] = info
         return info
 
-    def _set_cover(self, cover_data: bytes | None) -> None:
+    def _set_cover(self, cover_data: bytes | None, info: TrackInfo | None = None) -> None:
         try:
             if cover_data:
                 image = Image.open(BytesIO(cover_data)).convert("RGB")
             else:
-                image = Image.new("RGB", (72, 72), CARD)
+                image = _generated_cover(info, self._accent)
             self._cover_image = ctk.CTkImage(light_image=image, dark_image=image, size=(72, 72))
             self.cover_label.configure(image=self._cover_image, text="")
         except Exception:
@@ -354,7 +429,15 @@ class MainWindow(ctk.CTk):
         # Shortcuts hint
         hint_frame = ctk.CTkFrame(btn_frame, fg_color="transparent")
         hint_frame.pack(fill="x")
-        ctk.CTkLabel(hint_frame, text="Space: Play  S: Shuffle  L: Loop", text_color=TEXT_MUTED, font=("Segoe UI", 9)).pack(anchor="w", padx=4)
+        ctk.CTkLabel(
+            hint_frame,
+            text="Space   Play / Pause\n"
+            "S   Shuffle     L   Loop     M   Mute\n"
+            "← / →   Track       ↑ / ↓   Volume",
+            text_color=TEXT,
+            font=("Segoe UI", 12),
+            justify="left",
+        ).pack(anchor="w", padx=4)
         
         ctk.CTkLabel(btn_frame, text="PLAYLIST", text_color=TEXT_MUTED, font=("Segoe UI", 10)).pack(anchor="w", padx=8, pady=(8, 0))
         
@@ -370,6 +453,8 @@ class MainWindow(ctk.CTk):
         self._playlist_frame.grid_columnconfigure(0, weight=1)
         
         self._playlist_buttons: list[ctk.CTkFrame] = []
+        self._playlist_indicators: list[ctk.CTkLabel] = []
+        self._playlist_titles: list[ctk.CTkLabel] = []
         self._playlist_empty_label: ctk.CTkLabel | None = None
         self._show_empty_playlist()
 
@@ -384,8 +469,15 @@ class MainWindow(ctk.CTk):
         header.grid(row=0, column=0, sticky="ew", padx=32, pady=(20, 8))
         header.grid_propagate(False)
         
-        self.track_label = ctk.CTkLabel(header, text="No track loaded", text_color=TEXT, font=("Segoe UI Semibold", 22))
-        self.track_label.pack(anchor="w", pady=(8, 0))
+        self.track_label = MarqueeLabel(
+            header,
+            text="No track loaded",
+            characters=58,
+            text_color=TEXT,
+            font=("Segoe UI Semibold", 22),
+            anchor="w",
+        )
+        self.track_label.pack(anchor="w", fill="x", pady=(8, 0))
         self.artist_label = ctk.CTkLabel(header, text="Add files to get started", text_color=TEXT_DIM, font=("Segoe UI", 14))
         self.artist_label.pack(anchor="w")
         self.status_label = ctk.CTkLabel(header, text="", text_color=TEXT_MUTED, font=("Segoe UI", 11))
@@ -418,8 +510,15 @@ class MainWindow(ctk.CTk):
         info_text = ctk.CTkFrame(info_frame, fg_color="transparent")
         info_text.pack(side="left", fill="both", expand=True)
         
-        self.np_title = ctk.CTkLabel(info_text, text="Nothing playing", text_color=TEXT, font=("Segoe UI Semibold", 14), anchor="w")
-        self.np_title.pack(anchor="w", pady=(18, 2))
+        self.np_title = MarqueeLabel(
+            info_text,
+            text="Nothing playing",
+            characters=27,
+            text_color=TEXT,
+            font=("Segoe UI Semibold", 14),
+            anchor="w",
+        )
+        self.np_title.pack(anchor="w", fill="x", pady=(18, 2))
         self.np_artist = ctk.CTkLabel(info_text, text="Choose a track from the playlist", text_color=TEXT_DIM, font=("Segoe UI", 12), anchor="w")
         self.np_artist.pack(anchor="w")
 
@@ -894,6 +993,8 @@ class MainWindow(ctk.CTk):
         for row in self._playlist_buttons:
             row.destroy()
         self._playlist_buttons.clear()
+        self._playlist_indicators.clear()
+        self._playlist_titles.clear()
         if self._playlist_empty_label is not None:
             self._playlist_empty_label.destroy()
             self._playlist_empty_label = None
@@ -935,11 +1036,15 @@ class MainWindow(ctk.CTk):
             def select(_event=None, idx=i):
                 self._select_track(idx)
 
-            def enter(_event=None, widget=row, active=is_current):
-                widget.configure(fg_color=CARD if active else CARD_HOVER)
+            def enter(_event=None, widget=row, idx=i):
+                widget.configure(
+                    fg_color=CARD if idx == self._playlist_index else CARD_HOVER
+                )
 
-            def leave(_event=None, widget=row, active=is_current):
-                widget.configure(fg_color=CARD if active else "transparent")
+            def leave(_event=None, widget=row, idx=i):
+                widget.configure(
+                    fg_color=CARD if idx == self._playlist_index else "transparent"
+                )
 
             for widget in (row, indicator, title, subtitle):
                 widget.bind("<Button-1>", select, add="+")
@@ -948,8 +1053,27 @@ class MainWindow(ctk.CTk):
 
             Tooltip(row, f"{info.title}\n{info.artist}\n{path}")
             self._playlist_buttons.append(row)
+            self._playlist_indicators.append(indicator)
+            self._playlist_titles.append(title)
         if not self._playlist:
             self._show_empty_playlist()
+
+    def _update_playlist_selection(self, previous: int, current: int) -> None:
+        """Update only the rows whose selection state changed."""
+        for idx in {previous, current}:
+            if not 0 <= idx < len(self._playlist_buttons):
+                continue
+            is_current = idx == current
+            self._playlist_buttons[idx].configure(
+                fg_color=CARD if is_current else "transparent"
+            )
+            self._playlist_indicators[idx].configure(
+                text="▶" if is_current else str(idx + 1),
+                text_color=self._accent if is_current else TEXT_MUTED,
+            )
+            self._playlist_titles[idx].configure(
+                text_color=self._accent if is_current else TEXT
+            )
 
     def _show_empty_playlist(self) -> None:
         self._playlist_empty_label = ctk.CTkLabel(
@@ -968,60 +1092,132 @@ class MainWindow(ctk.CTk):
             self._viz_job = None
 
     def _select_track(self, idx: int, auto_play: bool = False) -> None:
-        if 0 <= idx < len(self._playlist):
-            self._stop_visualizer()
-            self.audio.stop()
-            
-            self._playlist_index = idx
-            self._track_end_handled = False
-            if self._shuffle and not auto_play:
-                self._generate_shuffle_order()
-            path = self._playlist[idx]
-            info = self._load_track_info(path)
-            result = self.audio.open_result(str(path))
-            if result.ok:
-                self._current_file = str(path)
-                self.track_label.configure(text=info.title)
-                self.np_title.configure(text=info.title)
-                self.np_artist.configure(text=info.artist)
-                detail = info.album if info.album else "Ready to play"
-                self.artist_label.configure(text=detail)
-                self._set_cover(info.cover_data)
-                self._set_status("")
-                self._viz_empty_label.configure(text="Press play to start the visualizer")
-                self._viz_empty_label.place(relx=0.5, rely=0.5, anchor="center")
-                
-                self.viz = Visualizer(fft_size=FFT_SIZE)
-                self._display_heights.fill(0)
-                self._peak_heights.fill(0)
-                self._peak_decay.fill(0)
-                self._update_position_display()
-                self._refresh_playlist_ui()
-                
-                if auto_play:
-                    if self.audio.play():
-                        self._viz_empty_label.place_forget()
-                        self.btn_play.configure(text="⏸")
-                        self.artist_label.configure(text="Now Playing")
-                        self._start_viz()
-                    else:
-                        self.btn_play.configure(text="▶")
-                        self.artist_label.configure(text="Playback failed")
-                        self._set_status(self.audio.last_error(), error=True)
-                else:
-                    self.btn_play.configure(text="▶")
-            else:
-                self.btn_play.configure(text="▶")
-                self.track_label.configure(text=info.title)
-                self.artist_label.configure(text="Could not load track")
-                self.np_title.configure(text=info.title)
-                self.np_artist.configure(text="Unavailable")
-                self._set_cover(None)
-                self._update_position_display()
-                self._set_status(result.message, error=True)
-                self._refresh_playlist_ui()
-        
+        if not 0 <= idx < len(self._playlist):
+            return
+
+        self._stop_visualizer()
+        self.audio.stop()
+        self._track_load_generation += 1
+        generation = self._track_load_generation
+
+        previous = self._playlist_index
+        self._playlist_index = idx
+        self._update_playlist_selection(previous, idx)
+        self._track_end_handled = False
+        if self._shuffle and not auto_play:
+            self._generate_shuffle_order()
+
+        path = self._playlist[idx]
+        info = self._load_track_info(path)
+        self._current_file = str(path)
+        self.track_label.set_text(info.title)
+        self.np_title.set_text(info.title)
+        self.np_artist.configure(text=info.artist)
+        self.artist_label.configure(text=info.album or "Loading track…")
+        self._set_cover(info.cover_data, info)
+        self._set_status("Decoding audio…" if not self.audio.is_cached(path) else "")
+        self._viz_empty_label.configure(text="Loading visualizer…")
+        self._viz_empty_label.place(relx=0.5, rely=0.5, anchor="center")
+        self.btn_play.configure(text="▶", state="disabled")
+
+        self.viz = Visualizer(fft_size=FFT_SIZE)
+        self._display_heights.fill(0)
+        self._peak_heights.fill(0)
+        self._peak_decay.fill(0)
+        self._update_position_display()
+
+        if self.audio.is_cached(path):
+            self._finish_track_load(generation, idx, info, auto_play)
+        else:
+            threading.Thread(
+                target=self._decode_track_worker,
+                args=(generation, idx, info, auto_play),
+                daemon=True,
+            ).start()
         self.focus_set()
+
+    def _decode_track_worker(
+        self,
+        generation: int,
+        idx: int,
+        info: TrackInfo,
+        auto_play: bool,
+    ) -> None:
+        result = self.audio.preload(info.path)
+        self._track_load_results.put(
+            (generation, idx, info, auto_play, result)
+        )
+
+    def _drain_track_load_results(self) -> None:
+        while True:
+            try:
+                generation, idx, info, auto_play, result = (
+                    self._track_load_results.get_nowait()
+                )
+            except queue.Empty:
+                return
+            if self._closing or generation != self._track_load_generation:
+                continue
+            if result.ok:
+                self._finish_track_load(generation, idx, info, auto_play)
+            else:
+                self._show_track_load_error(info, result.message)
+
+    def _finish_track_load(
+        self,
+        generation: int,
+        idx: int,
+        info: TrackInfo,
+        auto_play: bool,
+    ) -> None:
+        if generation != self._track_load_generation or idx != self._playlist_index:
+            return
+        result = self.audio.open_result(info.path)
+        self.btn_play.configure(state="normal")
+        if not result.ok:
+            self._show_track_load_error(info, result.message)
+            return
+
+        self.artist_label.configure(text=info.album or "Ready to play")
+        self._set_status("")
+        self._viz_empty_label.configure(text="Press play to start the visualizer")
+        self._viz_empty_label.place(relx=0.5, rely=0.5, anchor="center")
+        if auto_play:
+            if self.audio.play():
+                self._viz_empty_label.place_forget()
+                self.btn_play.configure(text="⏸")
+                self.artist_label.configure(text="Now Playing")
+                self._start_viz()
+            else:
+                self.artist_label.configure(text="Playback failed")
+                self._set_status(self.audio.last_error(), error=True)
+        self._prefetch_neighbors()
+
+    def _show_track_load_error(self, info: TrackInfo, message: str) -> None:
+        self.btn_play.configure(text="▶", state="normal")
+        self.artist_label.configure(text="Could not load track")
+        self.np_artist.configure(text="Unavailable")
+        self._set_cover(None, info)
+        self._viz_empty_label.configure(text="This track could not be decoded")
+        self._set_status(message, error=True)
+
+    def _prefetch_neighbors(self) -> None:
+        targets: list[Path] = []
+        for idx in (self._get_next_track_index(), self._get_prev_track_index()):
+            if 0 <= idx < len(self._playlist):
+                path = self._playlist[idx]
+                if path not in targets and not self.audio.is_cached(path):
+                    targets.append(path)
+        if not targets:
+            return
+
+        def worker() -> None:
+            for path in targets:
+                if self._closing:
+                    return
+                self.audio.preload(path)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _prev_track(self) -> None:
         next_idx = self._get_prev_track_index()
@@ -1092,6 +1288,7 @@ class MainWindow(ctk.CTk):
         self._tick_position()
 
     def _tick_position(self) -> None:
+        self._drain_track_load_results()
         cur = self.audio.position_sec()
         dur = self.audio.duration_sec()
         self._update_slider(cur, dur)
@@ -1241,6 +1438,70 @@ def _fmt(sec: float) -> str:
     m = int(sec) // 60
     s = int(sec) % 60
     return f"{m}:{s:02d}"
+
+
+def _infer_track_fields(path: Path) -> tuple[str, str | None]:
+    """Infer artist/title from common `artist - title` filenames."""
+    stem = " ".join(path.stem.replace("_", " ").split())
+    if " - " not in stem:
+        return stem, None
+    artist, title = stem.split(" - ", 1)
+    artist = artist.strip()
+    title = title.strip()
+    if artist.islower():
+        artist = artist.title()
+    return title or stem, artist or None
+
+
+def _sidecar_cover(path: Path) -> bytes | None:
+    """Read conventional cover artwork stored beside an audio file."""
+    for name in ("cover", "folder", "front", "album"):
+        for suffix in (".jpg", ".jpeg", ".png", ".webp"):
+            candidate = path.parent / f"{name}{suffix}"
+            try:
+                if candidate.is_file():
+                    return candidate.read_bytes()
+            except OSError:
+                continue
+    return None
+
+
+def _generated_cover(info: TrackInfo | None, accent: str) -> Image.Image:
+    """Generate recognizable fallback artwork from track identity."""
+    title = info.title if info else "Lumina"
+    artist = info.artist if info else ""
+    identity = f"{artist}\0{title}".encode("utf-8", errors="replace")
+    digest = hashlib.sha256(identity).digest()
+    accent_rgb = tuple(int(channel * 255) for channel in to_rgb(accent))
+    base = tuple(
+        max(24, min(210, (accent_rgb[i] + digest[i] * 2) // 3))
+        for i in range(3)
+    )
+    dark = tuple(max(8, channel // 3) for channel in base)
+
+    size = 144
+    image = Image.new("RGB", (size, size), dark)
+    draw = ImageDraw.Draw(image)
+    for y in range(size):
+        ratio = y / max(1, size - 1)
+        color = tuple(
+            int(dark[i] * (1 - ratio) + base[i] * ratio)
+            for i in range(3)
+        )
+        draw.line((0, y, size, y), fill=color)
+
+    source = artist if artist and not artist.endswith(" Audio") else title
+    words = [word for word in source.split() if word]
+    initials = "".join(word[0] for word in words[:2]).upper() or "♪"
+    try:
+        font = ImageFont.truetype("segoeuib.ttf", 58)
+    except OSError:
+        font = ImageFont.load_default()
+    box = draw.textbbox((0, 0), initials, font=font)
+    x = (size - (box[2] - box[0])) / 2
+    y = (size - (box[3] - box[1])) / 2 - box[1]
+    draw.text((x, y), initials, font=font, fill=(255, 255, 255))
+    return image
 
 
 def _first_tag(tags, *names: str) -> str | None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 import sys
 import threading
@@ -23,6 +24,21 @@ class AudioResult:
     message: str = ""
 
 
+@dataclass(frozen=True)
+class DecodedAudio:
+    """Decoded PCM ready to be activated for playback."""
+
+    path: Path
+    data: np.ndarray
+    mono: np.ndarray
+    sample_rate: int
+    channels: int
+
+    @property
+    def byte_size(self) -> int:
+        return int(self.data.nbytes + self.mono.nbytes)
+
+
 class AudioEngine:
     """Load and play local audio with miniaudio while keeping PCM for visualization."""
 
@@ -41,20 +57,52 @@ class AudioEngine:
         self._last_result = AudioResult(False, "No audio loaded")
         self._lock = threading.RLock()
         self._on_end: Callable[[], None] | None = None
+        self._cache: OrderedDict[Path, DecodedAudio] = OrderedDict()
+        self._cache_max_tracks = 3
+        self._cache_max_bytes = 256 * 1024 * 1024
 
     def open(self, path: str | Path) -> bool:
         """Load an audio file. Supports MP3, WAV, FLAC, and OGG."""
         return self.open_result(path).ok
 
     def open_result(self, path: str | Path) -> AudioResult:
-        path = Path(path)
-        if not path.is_file():
+        path = self._normalized_path(path)
+        validation = self._validate_path(path)
+        if not validation.ok:
             self._clear_loaded()
-            return self._set_result(False, f"File not found: {path}")
-        if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            self._clear_loaded()
-            return self._set_result(False, f"Unsupported file type: {path.suffix or 'unknown'}")
+            return self._set_result(False, validation.message)
 
+        decoded = self._get_cached(path)
+        if decoded is None:
+            result, decoded = self._decode(path)
+            if not result.ok or decoded is None:
+                self._clear_loaded()
+                return self._set_result(False, result.message)
+            self._store_cached(decoded)
+
+        self._activate(decoded)
+        return self._set_result(True, "")
+
+    def preload(self, path: str | Path) -> AudioResult:
+        """Decode a track into the bounded cache without changing playback."""
+        path = self._normalized_path(path)
+        validation = self._validate_path(path)
+        if not validation.ok:
+            return validation
+        if self.is_cached(path):
+            return AudioResult(True, "")
+
+        result, decoded = self._decode(path)
+        if result.ok and decoded is not None:
+            self._store_cached(decoded)
+        return result
+
+    def is_cached(self, path: str | Path) -> bool:
+        path = self._normalized_path(path)
+        with self._lock:
+            return path in self._cache
+
+    def _decode(self, path: Path) -> tuple[AudioResult, DecodedAudio | None]:
         try:
             decoded = miniaudio.decode_file(
                 str(path),
@@ -64,25 +112,68 @@ class AudioEngine:
             samples = np.asarray(decoded.samples, dtype=np.float32)
             channels = int(decoded.nchannels or 2)
             if samples.size == 0:
-                self._clear_loaded()
-                return self._set_result(False, "The audio file did not contain playable samples")
+                return AudioResult(False, "The audio file did not contain playable samples"), None
             samples = samples.reshape(-1, channels)
             mono = samples.mean(axis=1).astype(np.float32, copy=False)
+            prepared = DecodedAudio(
+                path=path,
+                data=samples,
+                mono=mono,
+                sample_rate=int(decoded.sample_rate),
+                channels=channels,
+            )
+            return AudioResult(True, ""), prepared
         except Exception as exc:
-            self._clear_loaded()
-            return self._set_result(False, f"Could not decode audio: {exc}")
+            return AudioResult(False, f"Could not decode audio: {exc}"), None
 
+    def _activate(self, decoded: DecodedAudio) -> None:
         with self._lock:
             old_device = self._detach_device_locked()
-            self._path = path
-            self._data = samples
-            self._mono = mono
-            self._sr = int(decoded.sample_rate)
-            self._channels = channels
+            self._path = decoded.path
+            self._data = decoded.data
+            self._mono = decoded.mono
+            self._sr = decoded.sample_rate
+            self._channels = decoded.channels
             self._pos = 0
             self._ended = False
         self._close_device(old_device)
-        return self._set_result(True, "")
+
+    def _validate_path(self, path: Path) -> AudioResult:
+        if not path.is_file():
+            return AudioResult(False, f"File not found: {path}")
+        if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            return AudioResult(False, f"Unsupported file type: {path.suffix or 'unknown'}")
+        return AudioResult(True, "")
+
+    @staticmethod
+    def _normalized_path(path: str | Path) -> Path:
+        path = Path(path)
+        try:
+            return path.resolve()
+        except OSError:
+            return path
+
+    def _get_cached(self, path: Path) -> DecodedAudio | None:
+        with self._lock:
+            decoded = self._cache.get(path)
+            if decoded is not None:
+                self._cache.move_to_end(path)
+            return decoded
+
+    def _store_cached(self, decoded: DecodedAudio) -> None:
+        with self._lock:
+            self._cache[decoded.path] = decoded
+            self._cache.move_to_end(decoded.path)
+            while (
+                len(self._cache) > self._cache_max_tracks
+                or sum(item.byte_size for item in self._cache.values())
+                > self._cache_max_bytes
+            ):
+                self._cache.popitem(last=False)
+
+    def clear_cache(self) -> None:
+        with self._lock:
+            self._cache.clear()
 
     def play(self) -> bool:
         """Start or resume playback. Returns True only when playback starts."""
