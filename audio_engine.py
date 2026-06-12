@@ -64,6 +64,7 @@ class AudioEngine:
             samples = np.asarray(decoded.samples, dtype=np.float32)
             channels = int(decoded.nchannels or 2)
             if samples.size == 0:
+                self._clear_loaded()
                 return self._set_result(False, "The audio file did not contain playable samples")
             samples = samples.reshape(-1, channels)
             mono = samples.mean(axis=1).astype(np.float32, copy=False)
@@ -194,6 +195,8 @@ class AudioEngine:
 
     def get_pcm_chunk(self, length: int) -> np.ndarray | None:
         """Return `length` mono samples at current position for FFT without advancing."""
+        if length <= 0:
+            return None
         with self._lock:
             if self._mono is None:
                 return None

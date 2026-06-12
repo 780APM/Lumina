@@ -12,18 +12,23 @@ class Visualizer:
     """Compute magnitude spectrum from PCM chunks for reactive bars."""
 
     def __init__(self, fft_size: int = 1024, smooth: int = 4) -> None:
+        self._validate_fft_size(fft_size)
         self.fft_size = fft_size
         self.smooth = max(1, smooth)
         self._history: Deque[np.ndarray] = deque(maxlen=smooth)
         self._window = np.hanning(fft_size).astype(np.float32)
 
     def set_fft_size(self, n: int) -> None:
+        self._validate_fft_size(n)
         self.fft_size = n
         self._window = np.hanning(n).astype(np.float32)
         self._history.clear()
 
     def push(self, samples: np.ndarray) -> None:
         """Feed mono float32 samples. Uses overlapping frames internally."""
+        samples = np.asarray(samples, dtype=np.float32)
+        if samples.ndim != 1:
+            raise ValueError("samples must be a one-dimensional mono array")
         n = self.fft_size
         if len(samples) < n:
             padded = np.zeros(n, dtype=np.float32)
@@ -33,13 +38,10 @@ class Visualizer:
             frame = samples[i : i + n] * self._window
             spec = np.abs(np.fft.rfft(frame))
             self._history.append(spec)
-        if len(samples) >= n and not self._history:
-            frame = samples[:n] * self._window
-            spec = np.abs(np.fft.rfft(frame))
-            self._history.append(spec)
-
     def get_magnitudes(self, n_bars: int) -> np.ndarray:
         """Return `n_bars` smoothed magnitude values (log-scaled, 0..1)."""
+        if n_bars <= 0:
+            raise ValueError("n_bars must be positive")
         if not self._history:
             return np.zeros(n_bars, dtype=np.float32)
         spec = np.mean(self._history, axis=0)
@@ -65,3 +67,8 @@ class Visualizer:
         if m > 0:
             x = x / m
         return np.clip(x, 0.0, 1.0).astype(np.float32)
+
+    @staticmethod
+    def _validate_fft_size(n: int) -> None:
+        if n < 2:
+            raise ValueError("fft_size must be at least 2")
