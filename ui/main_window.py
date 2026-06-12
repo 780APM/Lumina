@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import logging
 import random
 from dataclasses import dataclass
 from io import BytesIO
@@ -22,13 +22,17 @@ from matplotlib.colors import LinearSegmentedColormap, to_rgb, to_hex
 
 try:
     from Lumina.audio_engine import AudioEngine, SUPPORTED_EXTENSIONS
+    from Lumina.settings import DEFAULT_SETTINGS, load_settings, save_settings
     from Lumina.visualizer import Visualizer
 except ModuleNotFoundError:
     from audio_engine import AudioEngine, SUPPORTED_EXTENSIONS
+    from settings import DEFAULT_SETTINGS, load_settings, save_settings
     from visualizer import Visualizer
 
+LOGGER = logging.getLogger(__name__)
+
 # Default colors
-DEFAULT_ACCENT = "#1db954"
+DEFAULT_ACCENT = DEFAULT_SETTINGS["accent"]
 BG_DARK = "#0a0a0a"
 BG = "#121212"
 BG_LIGHT = "#181818"
@@ -39,15 +43,12 @@ TEXT = "#ffffff"
 TEXT_DIM = "#b3b3b3"
 TEXT_MUTED = "#727272"
 
-# Settings file stored beside the app package for this milestone.
-SETTINGS_FILE = Path(__file__).resolve().parent.parent / "settings.json"
-
 FFT_SIZE = 2048
 VIZ_BARS_2D = 48
 VIZ_BARS_CIRCULAR = 72
 VIZ_BARS_3D = 20  # Fewer bars for 3D performance
 VIZ_UPDATE_MS_2D = 16  # ~60fps for 2D
-VIZ_UPDATE_MS_3D = 16  # ~60fps for 3D
+VIZ_UPDATE_MS_3D = 33  # ~30fps; Matplotlib 3D redraws are expensive
 CHUNK_LEN = FFT_SIZE
 POSITION_UPDATE_MS = 150
 
@@ -110,24 +111,6 @@ class Tooltip:
         if self._job:
             self.widget.after_cancel(self._job)
             self._job = None
-
-
-def load_settings() -> dict:
-    if SETTINGS_FILE.exists():
-        try:
-            return json.loads(SETTINGS_FILE.read_text())
-        except Exception:
-            pass
-    return {"accent": DEFAULT_ACCENT, "viz_3d": False, "viz_circular": False}
-
-
-def save_settings(settings: dict) -> None:
-    try:
-        SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
-    except Exception:
-        pass
-
-
 class MainWindow(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
@@ -149,6 +132,7 @@ class MainWindow(ctk.CTk):
         self.audio = AudioEngine()
         self.viz = Visualizer(fft_size=FFT_SIZE)
         self._viz_job: str | None = None
+        self._viz_error_reported = False
         self._position_job: str | None = None
         self._updating_slider = False
         self._current_file: str = ""
@@ -386,6 +370,8 @@ class MainWindow(ctk.CTk):
         self._playlist_frame.grid_columnconfigure(0, weight=1)
         
         self._playlist_buttons: list[ctk.CTkFrame] = []
+        self._playlist_empty_label: ctk.CTkLabel | None = None
+        self._show_empty_playlist()
 
         # === Main Content ===
         main = ctk.CTkFrame(self, fg_color=BG_DARK, corner_radius=0)
@@ -432,9 +418,9 @@ class MainWindow(ctk.CTk):
         info_text = ctk.CTkFrame(info_frame, fg_color="transparent")
         info_text.pack(side="left", fill="both", expand=True)
         
-        self.np_title = ctk.CTkLabel(info_text, text="", text_color=TEXT, font=("Segoe UI Semibold", 14), anchor="w")
+        self.np_title = ctk.CTkLabel(info_text, text="Nothing playing", text_color=TEXT, font=("Segoe UI Semibold", 14), anchor="w")
         self.np_title.pack(anchor="w", pady=(18, 2))
-        self.np_artist = ctk.CTkLabel(info_text, text="", text_color=TEXT_DIM, font=("Segoe UI", 12), anchor="w")
+        self.np_artist = ctk.CTkLabel(info_text, text="Choose a track from the playlist", text_color=TEXT_DIM, font=("Segoe UI", 12), anchor="w")
         self.np_artist.pack(anchor="w")
 
         # Center: Transport controls
@@ -516,6 +502,7 @@ class MainWindow(ctk.CTk):
             widget.destroy()
         
         self._viz_bars = self._current_viz_bars()
+        self._viz_error_reported = False
         self._display_heights = np.zeros(self._viz_bars, dtype=np.float32)
         self._peak_heights = np.zeros(self._viz_bars, dtype=np.float32)
         self._peak_decay = np.zeros(self._viz_bars, dtype=np.float32)
@@ -537,6 +524,18 @@ class MainWindow(ctk.CTk):
         self._canvas = FigureCanvasTkAgg(self._fig, master=viz_frame)
         self._canvas.draw()
         self._canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        self._viz_empty_label = ctk.CTkLabel(
+            self._viz_container,
+            text="Your visualizer will appear here\nAdd a track to get started",
+            text_color=TEXT_MUTED,
+            font=("Segoe UI", 15),
+            justify="center",
+        )
+        if not self.audio.is_playing():
+            if self._playlist_index >= 0:
+                self._viz_empty_label.configure(text="Press play to start the visualizer")
+            self._viz_empty_label.place(relx=0.5, rely=0.5, anchor="center")
 
     def _setup_visualizer(self) -> None:
         """Configure the visualizer based on mode."""
@@ -895,6 +894,9 @@ class MainWindow(ctk.CTk):
         for row in self._playlist_buttons:
             row.destroy()
         self._playlist_buttons.clear()
+        if self._playlist_empty_label is not None:
+            self._playlist_empty_label.destroy()
+            self._playlist_empty_label = None
         
         for i, path in enumerate(self._playlist):
             is_current = (i == self._playlist_index)
@@ -946,6 +948,18 @@ class MainWindow(ctk.CTk):
 
             Tooltip(row, f"{info.title}\n{info.artist}\n{path}")
             self._playlist_buttons.append(row)
+        if not self._playlist:
+            self._show_empty_playlist()
+
+    def _show_empty_playlist(self) -> None:
+        self._playlist_empty_label = ctk.CTkLabel(
+            self._playlist_frame,
+            text="No tracks yet\nAdd MP3, WAV, FLAC, or OGG files",
+            text_color=TEXT_MUTED,
+            font=("Segoe UI", 11),
+            justify="left",
+        )
+        self._playlist_empty_label.grid(row=0, column=0, sticky="nw", padx=8, pady=10)
 
     def _stop_visualizer(self) -> None:
         """Stop the visualization loop."""
@@ -974,6 +988,8 @@ class MainWindow(ctk.CTk):
                 self.artist_label.configure(text=detail)
                 self._set_cover(info.cover_data)
                 self._set_status("")
+                self._viz_empty_label.configure(text="Press play to start the visualizer")
+                self._viz_empty_label.place(relx=0.5, rely=0.5, anchor="center")
                 
                 self.viz = Visualizer(fft_size=FFT_SIZE)
                 self._display_heights.fill(0)
@@ -984,6 +1000,7 @@ class MainWindow(ctk.CTk):
                 
                 if auto_play:
                     if self.audio.play():
+                        self._viz_empty_label.place_forget()
                         self.btn_play.configure(text="⏸")
                         self.artist_label.configure(text="Now Playing")
                         self._start_viz()
@@ -1021,6 +1038,8 @@ class MainWindow(ctk.CTk):
     def _toggle_play(self) -> None:
         if self.audio.is_playing():
             self.audio.pause()
+            self._viz_empty_label.configure(text="Paused")
+            self._viz_empty_label.place(relx=0.5, rely=0.5, anchor="center")
             self.btn_play.configure(text="▶")
             self.artist_label.configure(text="Paused")
         else:
@@ -1031,6 +1050,7 @@ class MainWindow(ctk.CTk):
                 return
             if self.audio.play():
                 self._track_end_handled = False
+                self._viz_empty_label.place_forget()
                 self.btn_play.configure(text="⏸")
                 self.artist_label.configure(text="Now Playing")
                 self._set_status("")
@@ -1065,7 +1085,7 @@ class MainWindow(ctk.CTk):
             finally:
                 self._updating_slider = False
         self._update_position_display()
-        
+
     def _start_position_updates(self) -> None:
         if self._position_job:
             self.after_cancel(self._position_job)
@@ -1088,6 +1108,8 @@ class MainWindow(ctk.CTk):
         if next_idx >= 0:
             self.after(80, lambda: self._select_track(next_idx, auto_play=True))
         else:
+            self._viz_empty_label.configure(text="Playback finished")
+            self._viz_empty_label.place(relx=0.5, rely=0.5, anchor="center")
             self.btn_play.configure(text="▶")
             self.artist_label.configure(text="Finished")
 
@@ -1141,7 +1163,9 @@ class MainWindow(ctk.CTk):
             
             self._canvas.draw_idle()
         except Exception:
-            pass  # Ignore errors during resize/move
+            if not self._viz_error_reported:
+                LOGGER.exception("Visualizer update failed")
+                self._viz_error_reported = True
         
         if self.audio.is_playing():
             update_ms = VIZ_UPDATE_MS_3D if self._viz_3d else VIZ_UPDATE_MS_2D
