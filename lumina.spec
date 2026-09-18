@@ -1,10 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files
 
 
 datas = collect_data_files("customtkinter")
-hiddenimports = collect_submodules("matplotlib.backends") + [
+hiddenimports = [
+    # miniaudio's CFFI extensions are loaded by its compiled module and are not
+    # reliably discovered from a one-file build's import graph.
+    "_cffi_backend",
+    "_miniaudio",
+    "matplotlib.backends.backend_tkagg",
+    "matplotlib.backends._backend_tk",
     "PIL.Image",
     "PIL.ImageTk",
     "mutagen.mp3",
