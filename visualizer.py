@@ -64,8 +64,10 @@ class Visualizer:
         x = np.clip(x, 1e-8, None)
         x = np.log10(x + 1)
         m = x.max()
-        if m > 0:
-            x = x / m
+        # Do not turn numerical noise or near-silence into a full-height bar.
+        if m <= 1e-6:
+            return np.zeros_like(x, dtype=np.float32)
+        x = x / m
         return np.clip(x, 0.0, 1.0).astype(np.float32)
 
     @staticmethod

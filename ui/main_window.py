@@ -24,11 +24,13 @@ from matplotlib.figure import Figure
 from matplotlib.colors import LinearSegmentedColormap, to_rgb, to_hex
 
 try:
-    from Lumina.audio_engine import AudioEngine, SUPPORTED_EXTENSIONS
+    from Lumina.audio_engine import SUPPORTED_EXTENSIONS
+    from Lumina.streaming_audio_engine import StreamingAudioEngine
     from Lumina.settings import DEFAULT_SETTINGS, load_settings, save_settings
     from Lumina.visualizer import Visualizer
 except ModuleNotFoundError:
-    from audio_engine import AudioEngine, SUPPORTED_EXTENSIONS
+    from audio_engine import SUPPORTED_EXTENSIONS
+    from streaming_audio_engine import StreamingAudioEngine
     from settings import DEFAULT_SETTINGS, load_settings, save_settings
     from visualizer import Visualizer
 
@@ -51,10 +53,12 @@ VIZ_BARS_2D = 48
 VIZ_BARS_CIRCULAR = 72
 VIZ_BARS_3D = 20  # Fewer bars for 3D performance
 VIZ_UPDATE_MS_2D = 16  # ~60fps for 2D
-VIZ_UPDATE_MS_3D = 33  # ~30fps; Matplotlib 3D redraws are expensive
+VIZ_UPDATE_MS_3D = 50  # 20fps; Matplotlib recreates 3D artists per frame.
 CHUNK_LEN = FFT_SIZE
 POSITION_UPDATE_MS = 150
 MARQUEE_UPDATE_MS = 140
+MAX_COVER_BYTES = 8 * 1024 * 1024
+MAX_COVER_DIMENSION = 1024
 
 
 @dataclass
@@ -192,7 +196,8 @@ class MainWindow(ctk.CTk):
         if self._viz_3d and self._viz_circular:
             self._viz_circular = False
 
-        self.audio = AudioEngine()
+        # Streaming keeps memory consumption flat for multi-hour lossless files.
+        self.audio = StreamingAudioEngine()
         self.viz = Visualizer(fft_size=FFT_SIZE)
         self._viz_job: str | None = None
         self._viz_error_reported = False
@@ -323,7 +328,7 @@ class MainWindow(ctk.CTk):
     def _load_track_info(self, path: Path) -> TrackInfo:
         try:
             path = path.resolve()
-        except Exception:
+        except OSError:
             pass
         if path in self._track_info:
             return self._track_info[path]
@@ -351,8 +356,8 @@ class MainWindow(ctk.CTk):
                 cover_data = _cover_from_tags(tags)
                 if cover_data is None and getattr(audio, "pictures", None):
                     cover_data = bytes(audio.pictures[0].data)
-        except Exception:
-            pass
+        except Exception as exc:
+            LOGGER.debug("Could not read metadata from %s: %s", path, exc)
         if cover_data is None:
             cover_data = _sidecar_cover(path)
 
@@ -362,8 +367,10 @@ class MainWindow(ctk.CTk):
 
     def _set_cover(self, cover_data: bytes | None, info: TrackInfo | None = None) -> None:
         try:
-            if cover_data:
-                image = Image.open(BytesIO(cover_data)).convert("RGB")
+            if cover_data and len(cover_data) <= MAX_COVER_BYTES:
+                with Image.open(BytesIO(cover_data)) as source:
+                    source.thumbnail((MAX_COVER_DIMENSION, MAX_COVER_DIMENSION))
+                    image = source.convert("RGB")
             else:
                 image = _generated_cover(info, self._accent)
             self._cover_image = ctk.CTkImage(light_image=image, dark_image=image, size=(72, 72))
@@ -1459,7 +1466,7 @@ def _sidecar_cover(path: Path) -> bytes | None:
         for suffix in (".jpg", ".jpeg", ".png", ".webp"):
             candidate = path.parent / f"{name}{suffix}"
             try:
-                if candidate.is_file():
+                if candidate.is_file() and candidate.stat().st_size <= MAX_COVER_BYTES:
                     return candidate.read_bytes()
             except OSError:
                 continue
@@ -1530,11 +1537,13 @@ def _cover_from_tags(tags) -> bytes | None:
     try:
         for value in tags.values():
             if getattr(value, "FrameID", "") == "APIC" and getattr(value, "data", None):
-                return bytes(value.data)
+                data = bytes(value.data)
+                return data if len(data) <= MAX_COVER_BYTES else None
         covr = tags.get("covr")
         if covr:
             first = covr[0] if isinstance(covr, (list, tuple)) else covr
-            return bytes(first)
+            data = bytes(first)
+            return data if len(data) <= MAX_COVER_BYTES else None
     except Exception:
         return None
     return None

@@ -15,8 +15,10 @@ dependencies = [
     "mutagen>=1.47",
     "numpy>=1.26",
     "Pillow>=10.0",
-    "pyinstaller>=6.0",
 ]
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.0"]
 
 [project.scripts]
 lumina = "Lumina.ui.main_window:run"

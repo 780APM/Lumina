@@ -32,11 +32,16 @@ python __main__.py
 
 ## Packaging
 
-Build a one-folder executable with PyInstaller:
+Build a portable single-file executable with PyInstaller:
 
 ```bash
-pyinstaller lumina.spec
+python -m pip install -e ".[build]"
+pyinstaller --clean lumina.spec
 ```
+
+The resulting `dist/Lumina.exe` is self-contained. Code-sign the release and
+publish its checksum before distributing it; unsigned one-file executables can
+trigger Windows reputation warnings.
 
 The app uses CustomTkinter, Tk, matplotlib, miniaudio, mutagen, Pillow, and numpy. If a platform-specific build misses a runtime asset, rebuild from the activated environment where those packages are installed.
 
@@ -54,11 +59,11 @@ Run the standard-library test suite from the repository root:
 python -m unittest discover -v
 ```
 
-The decoder currently loads each selected track into memory, so very large
-files use memory proportional to their decoded PCM size.
+Playback is streamed from disk. Lumina keeps only a short PCM window for the
+visualizer, so memory use does not grow with track duration.
 
-Lumina preloads nearby tracks into a small bounded cache to make next/previous
-navigation responsive. When embedded artwork is unavailable, it checks for
+Lumina preloads nearby tracks' lightweight decoder metadata into a bounded
+cache to make next/previous navigation responsive. When embedded artwork is unavailable, it checks for
 common sidecar files such as `cover.jpg` and then generates identity artwork
 from the inferred artist and title.
 
