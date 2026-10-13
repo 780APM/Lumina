@@ -508,7 +508,9 @@ class MainWindow(ctk.CTk):
         # Left: Track info
         info_frame = ctk.CTkFrame(now_playing, fg_color="transparent", width=320)
         info_frame.grid(row=0, column=0, sticky="nsw", padx=24, pady=24)
-        info_frame.grid_propagate(False)
+        # Its children use pack, so disable pack propagation to keep changing
+        # marquee text from resizing the track column and shifting the timeline.
+        info_frame.pack_propagate(False)
 
         self.cover_label = ctk.CTkLabel(info_frame, text="", width=72, height=72, fg_color=CARD, corner_radius=6)
         self.cover_label.pack(side="left", padx=(0, 14), pady=4)
@@ -516,6 +518,8 @@ class MainWindow(ctk.CTk):
 
         info_text = ctk.CTkFrame(info_frame, fg_color="transparent")
         info_text.pack(side="left", fill="both", expand=True)
+        # Keep a fixed text viewport within the remaining space beside the art.
+        info_text.pack_propagate(False)
         
         self.np_title = MarqueeLabel(
             info_text,
