@@ -123,7 +123,6 @@ class StreamingAudioEngine:
                 output_format=miniaudio.SampleFormat.FLOAT32, nchannels=track.channels,
                 sample_rate=track.sample_rate, backends=_preferred_backends(), app_name="Lumina",
             )
-            device.set_master_volume(self._volume)
             device.start(stream)
         except Exception as exc:
             self._close_device(device)
@@ -192,9 +191,6 @@ class StreamingAudioEngine:
     def set_volume(self, vol: float) -> None:
         with self._lock:
             self._volume = max(0.0, min(1.0, float(vol)))
-            device = self._device
-        if device is not None:
-            device.set_master_volume(self._volume)
 
     def get_volume(self) -> float:
         with self._lock:
@@ -230,7 +226,10 @@ class StreamingAudioEngine:
                 with self._lock:
                     self._position_frames += len(block)
                     self._visualizer_pcm = np.concatenate((self._visualizer_pcm, mono))[-VISUALIZER_SAMPLES:]
-                requested = yield block
+                    volume = self._volume
+                # miniaudio's PlaybackDevice has no master-volume API. Scale
+                # each output block so sliders and mute affect active playback.
+                requested = yield block * volume
         except StopIteration:
             # End of source is the normal completion signal from miniaudio.
             pass
