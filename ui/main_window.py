@@ -7,6 +7,7 @@ import logging
 import queue
 import random
 import threading
+import time
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -15,7 +16,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 from mutagen import File as MutagenFile
 import matplotlib
 matplotlib.use("TkAgg")
@@ -28,11 +29,15 @@ try:
     from Lumina.streaming_audio_engine import StreamingAudioEngine
     from Lumina.settings import DEFAULT_SETTINGS, load_settings, save_settings
     from Lumina.visualizer import Visualizer
+    from Lumina.branding import asset_path, set_windows_app_id
+    from Lumina.ui.canvas_visualizer import CanvasVisualizer
 except ModuleNotFoundError:
     from audio_engine import SUPPORTED_EXTENSIONS
     from streaming_audio_engine import StreamingAudioEngine
     from settings import DEFAULT_SETTINGS, load_settings, save_settings
     from visualizer import Visualizer
+    from branding import asset_path, set_windows_app_id
+    from ui.canvas_visualizer import CanvasVisualizer
 
 LOGGER = logging.getLogger(__name__)
 
@@ -52,7 +57,7 @@ FFT_SIZE = 2048
 VIZ_BARS_2D = 48
 VIZ_BARS_CIRCULAR = 72
 VIZ_BARS_3D = 20  # Fewer bars for 3D performance
-VIZ_UPDATE_MS_2D = 16  # ~60fps for 2D
+VIZ_UPDATE_MS_2D = 33  # 30 FPS leaves time for input and window redraws.
 VIZ_UPDATE_MS_3D = 50  # 20fps; Matplotlib recreates 3D artists per frame.
 CHUNK_LEN = FFT_SIZE
 POSITION_UPDATE_MS = 150
@@ -180,8 +185,21 @@ class MarqueeLabel(ctk.CTkLabel):
 
 class MainWindow(ctk.CTk):
     def __init__(self) -> None:
+        set_windows_app_id()
         super().__init__()
         self.title("Lumina")
+        self._window_icons = []
+        try:
+            with Image.open(asset_path("lumina.png")) as logo:
+                self._logo = logo.convert("RGBA")
+            self._window_icons = [ImageTk.PhotoImage(self._logo.resize((n, n), Image.Resampling.LANCZOS), master=self)
+                                  for n in (256, 64, 32, 16)]
+            self.iconphoto(True, *self._window_icons)
+            if asset_path("lumina.ico").is_file():
+                self.iconbitmap(str(asset_path("lumina.ico")))
+        except (OSError, tk.TclError):
+            self._logo = None
+            LOGGER.exception("Could not apply Lumina application icon")
         self.geometry("1200x800")
         self.minsize(900, 650)
         ctk.set_appearance_mode("dark")
@@ -201,6 +219,7 @@ class MainWindow(ctk.CTk):
         self.viz = Visualizer(fft_size=FFT_SIZE)
         self._viz_job: str | None = None
         self._viz_error_reported = False
+        self._last_viz_time: float | None = None
         self._position_job: str | None = None
         self._updating_slider = False
         self._current_file: str = ""
@@ -270,6 +289,10 @@ class MainWindow(ctk.CTk):
             self.after_cancel(self._position_job)
             self._position_job = None
         self.audio.stop()
+        # Cancel remaining idle draws and framework timers before deleting their
+        # Tcl commands. This also makes repeated local UI tests close cleanly.
+        for job in self.tk.call("after", "info"):
+            self.tk.call("after", "cancel", job)
         self.destroy()
 
     def _on_vol_mousewheel(self, event) -> None:
@@ -417,8 +440,13 @@ class MainWindow(ctk.CTk):
         
         title_left = ctk.CTkFrame(title_row, fg_color="transparent")
         title_left.grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(title_left, text="Lumina", text_color=TEXT, font=("Segoe UI Semibold", 26)).pack(anchor="w")
-        ctk.CTkLabel(title_left, text="Audio Visualizer", text_color=TEXT_MUTED, font=("Segoe UI", 11)).pack(anchor="w")
+        if self._logo is not None:
+            self._brand_image = ctk.CTkImage(light_image=self._logo, dark_image=self._logo, size=(40, 40))
+            ctk.CTkLabel(title_left, text="", image=self._brand_image).pack(side="left", padx=(0, 9))
+        brand_text = ctk.CTkFrame(title_left, fg_color="transparent")
+        brand_text.pack(side="left")
+        ctk.CTkLabel(brand_text, text="Lumina", text_color=TEXT, font=("Segoe UI Semibold", 26)).pack(anchor="w")
+        ctk.CTkLabel(brand_text, text="Your music. Offline.", text_color=TEXT_MUTED, font=("Segoe UI", 11)).pack(anchor="w")
         
         # Settings button
         self._settings_btn = ctk.CTkButton(title_row, text="⚙", width=36, height=36, fg_color="transparent", hover_color=CARD, text_color=TEXT_DIM, font=("Segoe UI", 18), command=self._open_settings)
@@ -606,41 +634,40 @@ class MainWindow(ctk.CTk):
         self.vol_slider.bind("<Button-5>", lambda e: self._volume_down())  # Linux scroll down
 
     def _create_visualizer(self) -> None:
-        """Create the matplotlib visualizer (2D or 3D based on settings)."""
-        # Clear existing
+        """Use native Tk shapes for 2D modes and retain Matplotlib for 3D."""
+        self._stop_visualizer()
+        old_canvas = getattr(self, "_canvas", None)
+        if isinstance(old_canvas, FigureCanvasTkAgg):
+            idle_id = getattr(old_canvas, "_idle_draw_id", None)
+            if idle_id:
+                old_canvas.get_tk_widget().after_cancel(idle_id)
+                old_canvas._idle_draw_id = None
         for widget in self._viz_container.winfo_children():
             widget.destroy()
-        
         self._viz_bars = self._current_viz_bars()
         self._viz_error_reported = False
         self._display_heights = np.zeros(self._viz_bars, dtype=np.float32)
         self._peak_heights = np.zeros(self._viz_bars, dtype=np.float32)
         self._peak_decay = np.zeros(self._viz_bars, dtype=np.float32)
-        
-        if self._viz_circular:
-            self._fig = Figure(figsize=(8, 5), facecolor=BG, dpi=80)
-            self._ax = self._fig.add_subplot(111, projection="polar")
-        elif self._viz_3d:
+        self._update_colormap()
+        if self._viz_3d:
             self._fig = Figure(figsize=(10, 5), facecolor=BG, dpi=60)
-            self._ax = self._fig.add_subplot(111, projection='3d')
+            self._ax = self._fig.add_subplot(111, projection="3d")
+            self._setup_visualizer()
+            frame = tk.Frame(self._viz_container, bg=BG)
+            frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+            self._canvas = FigureCanvasTkAgg(self._fig, master=frame)
+            self._canvas.draw()
+            self._canvas.get_tk_widget().pack(fill="both", expand=True)
         else:
-            self._fig = Figure(figsize=(10, 4), facecolor=BG, dpi=80)
-            self._ax = self._fig.add_subplot(111)
-        
-        self._setup_visualizer()
-        
-        viz_frame = tk.Frame(self._viz_container, bg=BG)
-        viz_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-        self._canvas = FigureCanvasTkAgg(self._fig, master=viz_frame)
-        self._canvas.draw()
-        self._canvas.get_tk_widget().pack(fill="both", expand=True)
-
+            self._canvas = CanvasVisualizer(self._viz_container, self._viz_bars,
+                                            circular=self._viz_circular, background=BG)
+            self._canvas.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+            self._canvas.set_palette(self._cmap(np.linspace(0, 1, 256)))
         self._viz_empty_label = ctk.CTkLabel(
             self._viz_container,
             text="Your visualizer will appear here\nAdd a track to get started",
-            text_color=TEXT_MUTED,
-            font=("Segoe UI", 15),
-            justify="center",
+            text_color=TEXT_MUTED, font=("Segoe UI", 15), justify="center",
         )
         if not self.audio.is_playing():
             if self._playlist_index >= 0:
@@ -648,78 +675,16 @@ class MainWindow(ctk.CTk):
             self._viz_empty_label.place(relx=0.5, rely=0.5, anchor="center")
 
     def _setup_visualizer(self) -> None:
-        """Configure the visualizer based on mode."""
-        self._ax.clear()
+        """Set up the optional 3D axes; 2D modes do not use Matplotlib."""
         self._ax.set_facecolor(BG)
-        self._fig.patch.set_facecolor(BG)
-        self._update_colormap()
-        
-        if self._viz_circular:
-            self._ax.set_facecolor(BG)
-            self._ax.set_theta_zero_location("N")
-            self._ax.set_theta_direction(-1)
-            self._ax.set_ylim(0, 1.15)
-            self._ax.set_axis_off()
-            self._angles = np.linspace(0, 2 * np.pi, self._viz_bars, endpoint=False)
-            self._angle_width = (2 * np.pi / self._viz_bars) * 0.78
-            self._bars = self._ax.bar(
-                self._angles,
-                [0.02] * self._viz_bars,
-                width=self._angle_width,
-                bottom=0.34,
-                color=[self._cmap(0.35)] * self._viz_bars,
-                edgecolor="none",
-                alpha=0.95,
-            )
-            self._peaks = self._ax.bar(
-                self._angles,
-                [0.018] * self._viz_bars,
-                width=self._angle_width,
-                bottom=[0.36] * self._viz_bars,
-                color="#ffffff",
-                edgecolor="none",
-                alpha=0.9,
-            )
-        elif self._viz_3d:
-            # 3D setup
-            self._ax.set_axis_off()
-            self._ax.xaxis.pane.fill = False
-            self._ax.yaxis.pane.fill = False
-            self._ax.zaxis.pane.fill = False
-            self._ax.xaxis.pane.set_edgecolor('none')
-            self._ax.yaxis.pane.set_edgecolor('none')
-            self._ax.zaxis.pane.set_edgecolor('none')
-            self._ax.view_init(elev=self._view_elev, azim=self._view_azim)
-            self._ax.set_xlim(-1, self._viz_bars + 1)
-            self._ax.set_ylim(-0.5, 1.5)
-            self._ax.set_zlim(-0.25, 1.1)
-        else:
-            # 2D setup
-            self._ax.set_xlim(-0.5, self._viz_bars - 0.5)
-            self._ax.set_ylim(-0.25, 1.15)
-            self._ax.axis("off")
-            
-            # Main bars
-            self._bars = self._ax.bar(
-                range(self._viz_bars), [0.01] * self._viz_bars, 
-                width=0.8, color=[self._cmap(0.3)] * self._viz_bars,
-                edgecolor='none'
-            )
-            
-            # Reflection bars
-            self._reflections = self._ax.bar(
-                range(self._viz_bars), [0.01] * self._viz_bars,
-                width=0.8, color=[(*to_rgb(self._cmap(0.3)), 0.2)] * self._viz_bars,
-                edgecolor='none', bottom=[-0.01] * self._viz_bars
-            )
-            
-            # Peak indicators
-            self._peaks = self._ax.bar(
-                range(self._viz_bars), [0.015] * self._viz_bars,
-                width=0.8, color='#ffffff', alpha=0.9,
-                edgecolor='none', bottom=[0] * self._viz_bars
-            )
-        
+        self._ax.set_axis_off()
+        for axis in (self._ax.xaxis, self._ax.yaxis, self._ax.zaxis):
+            axis.pane.fill = False
+            axis.pane.set_edgecolor("none")
+        self._ax.view_init(elev=self._view_elev, azim=self._view_azim)
+        self._ax.set_xlim(-1, self._viz_bars + 1)
+        self._ax.set_ylim(-0.5, 1.5)
+        self._ax.set_zlim(-0.25, 1.1)
         self._fig.tight_layout(pad=0)
 
     def _update_colormap(self) -> None:
@@ -736,6 +701,9 @@ class MainWindow(ctk.CTk):
             self._cmap = LinearSegmentedColormap.from_list('accent', colors)
         except Exception:
             self._cmap = LinearSegmentedColormap.from_list('default', ['#004400', '#00ff00', '#ffff00'])
+        canvas = getattr(self, "_canvas", None)
+        if isinstance(canvas, CanvasVisualizer) and canvas.winfo_exists():
+            canvas.set_palette(self._cmap(np.linspace(0, 1, 256)))
 
     def _open_settings(self) -> None:
         """Open settings as an in-app modal panel."""
@@ -1101,6 +1069,7 @@ class MainWindow(ctk.CTk):
         if self._viz_job:
             self.after_cancel(self._viz_job)
             self._viz_job = None
+        self._last_viz_time = None
 
     def _select_track(self, idx: int, auto_play: bool = False) -> None:
         if not 0 <= idx < len(self._playlist):
@@ -1336,9 +1305,23 @@ class MainWindow(ctk.CTk):
     def _start_viz(self) -> None:
         if self._viz_job:
             self.after_cancel(self._viz_job)
+        self._last_viz_time = None
         self._tick_viz()
 
     def _tick_viz(self) -> None:
+        self._viz_job = None
+        if self._closing:
+            return
+        if self.state() == "iconic" or not self.winfo_viewable():
+            self._last_viz_time = None
+            if self.audio.is_playing():
+                self._viz_job = self.after(250, self._tick_viz)
+            return
+        started = time.monotonic()
+        elapsed = min(0.25, started - self._last_viz_time) if self._last_viz_time else VIZ_UPDATE_MS_2D / 1000
+        self._last_viz_time = started
+        # Preserve smoothing speed across different frame rates and slow frames.
+        frame_scale = max(0.01, elapsed / 0.016)
         try:
             chunk = self.audio.get_pcm_chunk(CHUNK_LEN)
             if chunk is not None and len(chunk) >= FFT_SIZE:
@@ -1347,8 +1330,8 @@ class MainWindow(ctk.CTk):
             target = self.viz.get_magnitudes(self._viz_bars)
             
             # Smooth animation
-            attack = 0.5
-            decay = 0.92
+            attack = 1 - 0.5 ** frame_scale
+            decay = 0.92 ** frame_scale
             for i in range(self._viz_bars):
                 if target[i] > self._display_heights[i]:
                     self._display_heights[i] = attack * target[i] + (1 - attack) * self._display_heights[i]
@@ -1359,8 +1342,8 @@ class MainWindow(ctk.CTk):
                     self._peak_heights[i] = self._display_heights[i]
                     self._peak_decay[i] = 0
                 else:
-                    self._peak_decay[i] += 0.008
-                    self._peak_heights[i] = max(0, self._peak_heights[i] - self._peak_decay[i])
+                    self._peak_decay[i] += 0.008 * frame_scale
+                    self._peak_heights[i] = max(0, self._peak_heights[i] - self._peak_decay[i] * frame_scale)
             
             if self._viz_circular:
                 self._draw_circular()
@@ -1369,7 +1352,8 @@ class MainWindow(ctk.CTk):
             else:
                 self._draw_2d()
             
-            self._canvas.draw_idle()
+            if self._viz_3d:
+                self._canvas.draw_idle()
         except Exception:
             if not self._viz_error_reported:
                 LOGGER.exception("Visualizer update failed")
@@ -1377,25 +1361,13 @@ class MainWindow(ctk.CTk):
         
         if self.audio.is_playing():
             update_ms = VIZ_UPDATE_MS_3D if self._viz_3d else VIZ_UPDATE_MS_2D
-            self._viz_job = self.after(update_ms, self._tick_viz)
+            remaining_ms = max(1, update_ms - round((time.monotonic() - started) * 1000))
+            self._viz_job = self.after(remaining_ms, self._tick_viz)
         else:
             self._viz_job = None
 
     def _draw_circular(self) -> None:
-        """Draw radial 2D visualization."""
-        inner_radius = 0.34
-        max_height = 0.72
-        for bar, peak_bar, h, ph in zip(self._bars, self._peaks, self._display_heights, self._peak_heights):
-            h_val = max(0.025, min(max_height, h * max_height))
-            peak_radius = inner_radius + max(0.03, min(max_height, ph * max_height))
-            color = self._cmap(min(1.0, h * 1.3))
-
-            bar.set_height(h_val)
-            bar.set_color(color)
-            bar.set_alpha(0.95)
-
-            peak_bar.set_y(peak_radius)
-            peak_bar.set_height(0.016)
+        self._canvas.render(self._display_heights, self._peak_heights)
 
     def _draw_3d(self) -> None:
         """Draw optimized 3D visualization while preserving user rotation."""
@@ -1426,23 +1398,7 @@ class MainWindow(ctk.CTk):
             self._ax.bar3d(i, 0, -ref_h - 0.02, 0.85, 0.6, ref_h, color=(*ref_color, 0.18), shade=False, edgecolor='none')
 
     def _draw_2d(self) -> None:
-        """Draw fast 2D visualization."""
-        for i, (bar, ref_bar, peak_bar, h, ph) in enumerate(
-            zip(self._bars, self._reflections, self._peaks, self._display_heights, self._peak_heights)
-        ):
-            h_val = max(0.02, h)
-            color = self._cmap(min(1.0, h * 1.3))
-            
-            bar.set_height(h_val)
-            bar.set_color(color)
-            
-            ref_h = h_val * 0.3
-            ref_bar.set_height(ref_h)
-            ref_bar.set_y(-ref_h - 0.01)
-            ref_color = to_rgb(color)
-            ref_bar.set_color((*ref_color, 0.2))
-            
-            peak_bar.set_y(ph)
+        self._canvas.render(self._display_heights, self._peak_heights)
 
 
 def _fmt(sec: float) -> str:

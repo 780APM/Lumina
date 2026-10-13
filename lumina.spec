@@ -1,9 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from PyInstaller.utils.hooks import collect_data_files
+from pathlib import Path
 
 
 datas = collect_data_files("customtkinter")
+asset_root = Path(SPECPATH) / "assets"
+datas += [(str(asset_root / name), "assets") for name in ("lumina.png", "lumina.ico")]
 hiddenimports = [
     # miniaudio's CFFI extensions are loaded by its compiled module and are not
     # reliably discovered from a one-file build's import graph.
@@ -44,6 +47,7 @@ exe = EXE(
     a.datas,
     [],
     name="Lumina",
+    icon=str(asset_root / "lumina.ico"),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -29,3 +29,6 @@ packages = ["Lumina", "Lumina.ui"]
 [tool.setuptools.package-dir]
 Lumina = "."
 "Lumina.ui" = "ui"
+
+[tool.setuptools.package-data]
+Lumina = ["assets/*.png", "assets/*.ico"]

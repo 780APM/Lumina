@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lumina · Lumen brand kit</title>
+<style>
+  :root{color-scheme:dark;--green:#36f875;--bg:#0c1010;--white:#f4f6f2;--gray:#b3b3b3}
+  *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--white);font:16px/1.65 "Segoe UI",Arial,sans-serif}
+  main{max-width:1160px;margin:auto;padding:42px 30px 70px}nav{display:flex;align-items:center;gap:14px;margin-bottom:36px}
+  nav img{width:54px;height:54px}nav strong{font-size:26px;letter-spacing:.08em}nav span{margin-left:auto;color:var(--gray);font-size:13px}
+  h1{font-size:clamp(34px,5vw,64px);line-height:1.1;letter-spacing:-.04em;margin:0 0 16px}h2{font-size:24px;margin:0 0 18px}
+  p{color:var(--gray);max-width:780px}.green,a{color:var(--green)}a{text-underline-offset:4px}
+  .hero{display:block;width:100%;border:1px solid #27332e;border-radius:20px;margin:30px 0 50px}
+  section{padding:34px 0;border-top:1px solid #27332e}.grid{display:grid;grid-template-columns:1fr 1fr;gap:28px}
+  .card{background:#141a17;border:1px solid #27332e;padding:24px;border-radius:18px}.card img{width:100%;max-width:360px;display:block;margin:auto}
+  .sizes{display:flex;align-items:center;gap:22px;min-height:100px}.sizes img{margin:0;width:auto}.swatches{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+  .swatch{height:80px;border-radius:12px;border:1px solid #27332e}.swatches p{font-size:13px}.spec{font-size:13px;color:var(--gray)}
+  blockquote{margin:22px 0;font-size:32px;line-height:1.2;font-weight:700;letter-spacing:-.03em}.poster{max-width:600px;width:100%;border-radius:18px}
+  footer{margin-top:40px;color:var(--gray);font-size:13px}li{margin:7px 0}code{font-family:Consolas,monospace}
+  @media(max-width:700px){.grid,.swatches{grid-template-columns:1fr 1fr}nav span{display:none}.grid{grid-template-columns:1fr}}
+</style>
+<main>
+  <nav><img src="lumen-logo.png" alt="Lumen icon"><strong>LUMINA</strong><span>IDENTITY &amp; LAUNCH KIT · OCTOBER 2026</span></nav>
+  <h1>Your music.<br><span class="green">Offline.</span></h1>
+  <p>A beam of light for the music you own. A clear, compact identity built around local listening, living sound, and a player that feels like yours.</p>
+  <img class="hero" src="launch-banner.png" alt="Lumina launch artwork: Your music. Offline. Local files. Living sound.">
+  <section><h2>01 · The Lumen mark</h2><div class="grid">
+    <div class="card"><img src="lumen-logo.png" alt="Green curved L on a charcoal tile"><p class="spec">RGBA master · transparent outer corners</p><a href="lumen-logo.png" download>Download master PNG</a></div>
+    <div class="card"><h2>Made to be recognized.</h2><p>A thick light-beam L, a smooth elbow, and an open sweep. Keep the silhouette intact, leave clear space around the mark, and let the green carry the identity.</p>
+      <div class="sizes"><img src="lumen-logo.png" width="64" height="64" alt="64 pixel icon"><img src="lumen-logo.png" width="32" height="32" alt="32 pixel icon"><img src="lumen-logo.png" width="16" height="16" alt="16 pixel icon"></div>
+      <p class="spec">64 / 32 / 16 px previews. Use the multi-resolution ICO for Windows.</p><a href="lumina.ico" download>Download Windows ICO</a>
+    </div></div></section>
+  <section><h2>02 · The palette</h2><div class="swatches">
+    <div><div class="swatch" style="background:#36f875"></div><p>Lumen green<br><code>#36F875</code></p></div>
+    <div><div class="swatch" style="background:#0c1010"></div><p>Charcoal<br><code>#0C1010</code></p></div>
+    <div><div class="swatch" style="background:#f4f6f2"></div><p>Soft white<br><code>#F4F6F2</code></p></div>
+    <div><div class="swatch" style="background:#b3b3b3"></div><p>Secondary gray<br><code>#B3B3B3</code></p></div>
+  </div><p>Bold sans-serif headlines. Short, human copy. Quiet surfaces, bright moments. The logo stays green while the player lets listeners choose their own accent.</p></section>
+  <section><h2>03 · Launch artwork</h2><div class="grid"><div><img class="poster" src="social-square.png" alt="Square Lumina poster: No streaming. No accounts."><p><a href="social-square.png" download>Download square social artwork</a></p></div>
+    <div class="card"><h2>Local files. Living sound.</h2><blockquote>Your music. Offline.</blockquote><p>Meet Lumina: a Windows music player for the tracks you already own. Local MP3, FLAC, WAV, and OGG files. Reactive visuals. No streaming. No accounts.</p>
+      <ul><li>Local music and embedded artwork</li><li>2D, circular, and optional 3D visualizers</li><li>Drag or scroll to set the volume</li><li>Portable Windows player</li></ul>
+      <p><a href="launch-banner.png" download>Download wide launch banner</a></p><p><a href="README.md">Full copy and usage guide</a></p>
+    </div></div></section>
+  <footer>LUMINA · Lumen identity. Digital RGB artwork. <a href="generation-prompts.md">Generation prompts</a>. No campaign has been published.</footer>
+</main>
+</html>
