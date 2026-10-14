@@ -1,81 +1,117 @@
-# Lumina
+<p align="center">
+  <img src="assets/lumina-256.png" width="88" height="88" alt="Lumina Lumen icon">
+</p>
 
-Lumina is a local desktop audio player with a Spotify-like layout and reactive visualizer.
+<h1 align="center">Lumina</h1>
 
-![Lumina — Your music. Offline.](branding/launch-banner.png)
+<p align="center"><strong>Your music. Offline.</strong></p>
+
+<p align="center">
+  A portable Windows music player for the tracks you already own.<br>
+  Local files, album artwork, and reactive visuals. No streaming. No accounts.
+</p>
+
+<p align="center">
+  <a href="#features">Features</a> ·
+  <a href="#getting-started">Getting started</a> ·
+  <a href="#development">Development</a> ·
+  <a href="branding/README.md">Brand kit</a> ·
+  <a href="LICENSE">MIT license</a>
+</p>
+
+![Lumina — Your music. Offline. Local files. Living sound.](branding/launch-banner.png)
+
+## Features
+
+- **Local listening.** Play MP3, FLAC, WAV, and OGG files from your computer.
+- **Music with an identity.** View titles, artists, albums, and embedded artwork. Missing tags fall back to filenames; missing artwork uses sidecar covers or generated art.
+- **Reactive visuals.** Choose a spectrum, circular visualizer, or optional rotatable 3D view. The 2D modes use lightweight native canvas rendering.
+- **Familiar controls.** Seek through a track, shuffle, loop the playlist, mute, and adjust volume by dragging or scrolling the slider.
+- **Make it yours.** Pick an accent color, with long titles scrolling inside a fixed track panel.
+- **Portable playback.** The single-file Windows EXE bundles its runtime. Listeners do not need Python installed.
+
+Playback streams from disk instead of loading complete tracks into memory. Visualization pauses while the window is minimized.
+
+## Getting started
+
+1. Open `Lumina.exe`.
+2. Select **Add Files** and choose your local audio files.
+3. Select a track and press **Play** or **Space**.
+4. Open **Settings** to change the accent and visualizer mode.
+
+To create the portable EXE yourself, follow [Building the Windows app](#building-the-windows-app). The [Windows build workflow](https://github.com/780APM/Lumina/actions/workflows/windows-release.yml) can also be run manually by a repository maintainer; successful runs provide a `Lumina-windows` artifact containing the EXE.
+
+### Keyboard controls
+
+| Key | Action |
+| --- | --- |
+| Space | Play / pause |
+| ← / → | Previous / next track |
+| ↑ / ↓ | Volume up / down |
+| M | Mute / restore volume |
+| S | Toggle shuffle |
+| L | Toggle playlist looping |
+
+Scroll over the volume slider to adjust it with the mouse wheel. Hover over the timeline to preview the seek position.
 
 ## Development
 
-Create an environment and install the app in editable mode:
+Requires **Python 3.11+**. From the repository folder, create an environment and install Lumina:
 
-```bash
+```powershell
 python -m venv .venv
-source .venv/bin/activate
-python -m pip install -e .
+.\.venv\Scripts\python.exe -m pip install -e ".[build]"
+.\.venv\Scripts\python.exe -m Lumina
 ```
 
-Run the app:
+On macOS/Linux, use `.venv/bin/python` instead of the Windows interpreter path. Playback backends support those platforms, but the distributed EXE and release workflow target Windows.
 
-```bash
-lumina
+After installation, `lumina` and `python -m Lumina` are available. You can also run `python __main__.py` directly from this folder.
+
+### Tests
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -v
 ```
 
-After installation, the package can also be run with:
+The suite covers playback, volume, settings, artwork, stable title layout, persistent visualizer shapes, mode switching, and icon assets. UI tests require a desktop display.
 
-```bash
-python -m Lumina
+## Building the Windows app
+
+Build on Windows from the environment above:
+
+```powershell
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean lumina.spec
 ```
 
-From this source folder without installing, use:
+The portable executable is written to **`dist/Lumina.exe`**. Its Lumen icon and runtime artwork are bundled by the spec. `build/`, `dist/`, Python caches, and generated package metadata are excluded from Git.
 
-```bash
-python __main__.py
-```
+GitHub Actions runs the tests and builds the same EXE on version tags or manual dispatch. Build artifacts are attached to the workflow run; pushing source changes alone does not publish a downloadable release.
 
-## Packaging
+## Project layout
 
-Build a portable single-file executable with PyInstaller:
+| Location | Purpose |
+| --- | --- |
+| `ui/` | Player interface and native canvas visualizers |
+| `streaming_audio_engine.py` | Streaming playback and volume control |
+| `visualizer.py` | FFT spectrum analysis |
+| `settings.py` | Validated per-user preferences |
+| `branding.py`, `assets/` | Runtime logo, Windows identity, PNG/ICO assets |
+| `branding/` | Promotional artwork, copy, and visual brand guide |
+| `tests/` | Regression tests |
+| `docs/` | Performance review and original icon concepts |
 
-```bash
-python -m pip install -e ".[build]"
-pyinstaller --clean lumina.spec
-```
+Settings are stored under `%APPDATA%\Lumina\settings.json` on Windows. Older package-local settings are supported as a migration fallback.
 
-The resulting `dist/Lumina.exe` is self-contained. Code-sign the release and
-publish its checksum before distributing it; unsigned one-file executables can
-trigger Windows reputation warnings.
+## Lumen brand kit
 
-The app uses CustomTkinter, Tk, matplotlib, miniaudio, mutagen, Pillow, and numpy. If a platform-specific build misses a runtime asset, rebuild from the activated environment where those packages are installed.
+The curved green **Lumen** mark appears in the executable, running window, and sidebar. The kit includes the PNG logo, multi-resolution Windows ICO, wide launch banner, square social artwork, copy, and usage guidance.
 
-The Lumen icon is applied to the executable and running window. Source PNG/ICO
-files live in `assets/`. The [brand kit](branding/README.md) includes launch and
-social artwork, copy, and an offline visual guide.
+<p align="center">
+  <img src="branding/social-square.png" width="380" alt="Lumina social artwork — Your music. Offline. No streaming. No accounts.">
+</p>
 
-## Settings
-
-Lumina stores validated settings in the platform config directory, such as
-`%APPDATA%\Lumina` on Windows. A package-level `settings.json` from older
-versions is read as a migration fallback.
-
-## Tests
-
-Run the standard-library test suite from the repository root:
-
-```bash
-python -m unittest discover -v
-```
-
-Playback is streamed from disk. Lumina keeps only a short PCM window for the
-visualizer, so memory use does not grow with track duration.
-
-2D and circular visualizers update persistent native Tk Canvas shapes at a
-30 FPS budget, preserving peaks, reflections, and custom accents. Visualization
-is suspended while minimized; optional 3D rendering still uses Matplotlib.
-
-Lumina preloads nearby tracks' lightweight decoder metadata into a bounded
-cache to make next/previous navigation responsive. When embedded artwork is unavailable, it checks for
-common sidecar files such as `cover.jpg` and then generates identity artwork
-from the inferred artist and title.
+Explore the [brand kit and usage guide](branding/README.md). Open `branding/index.html` locally for the visual guide.
 
 ## License
 

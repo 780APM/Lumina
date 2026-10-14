@@ -72,7 +72,8 @@ supports benchmarking a lighter renderer before investing in FFT optimizations.
    seeking, and mode changes; include a large/high-DPI window. Retain bounded
    PCM storage and avoid moving Tk rendering into a background thread.
 
-The renderer implementation was not changed during this review.
+The initial review above measured the original implementation. The accepted
+replacement was implemented afterward; see the follow-up below.
 
 References: [Tkinter event-loop threading model](https://docs.python.org/3/library/tkinter.html#threading-model)
 and [Matplotlib blitting](https://matplotlib.org/stable/users/explain/animations/blitting.html).
@@ -86,6 +87,33 @@ the ICO to PyInstaller's `EXE(icon=...)`, bundle the runtime assets, and set a
 Windows application identity so taskbar grouping is consistent. Verify the
 running app, Explorer icon, pinned shortcut, and high-DPI display independently.
 
-Keep the mark bold and recognizable at 16/32 pixels. The current spec has no
-custom icon, and MainWindow does not assign one. Final integration should follow
-selection of a concept.
+Keep the mark bold and recognizable at 16/32 pixels. At the time of the initial
+review the app had no custom icon. The selected Lumen design is now integrated.
+
+## Implementation follow-up
+
+The 2D and circular modes now use `ui/canvas_visualizer.py` with 144 persistent
+Tk items in each mode. They no longer create Matplotlib figures or request
+TkAgg redraws. Bars, reflections, peaks, resizing, and user accents are retained.
+Animation has a 33 ms frame budget with elapsed-time smoothing, a single pending
+tick, and a 250 ms resume poll while minimized/hidden. Optional 3D retains its
+Matplotlib implementation; its geometry rebuild is not optimized in this change.
+
+Integrated local tests, using FFT plus real canvas updates and Tk paint, measured:
+
+| Mode | Original mean | New mean | New p95 |
+| --- | ---: | ---: | ---: |
+| 2D | 9.02 ms | 2.50 ms | 2.81 ms |
+| Circular | 30.74 ms | 5.03 ms | 13.02 ms |
+
+A separate short real-playback test with muted output measured UI callback delay
+at 5.63 ms mean / 6.94 ms p95 for 2D, and 5.64 ms mean / 6.84 ms p95 for circular.
+Windows delivered about 23 updates per second during that test: 30 FPS is a
+budget, not a guaranteed rate, and OS timer granularity affects scheduling.
+These are short local measurements rather than long-session or hardware-wide
+guarantees.
+
+The Lumen logo is applied to the sidebar and running window; a seven-size ICO is
+embedded in the EXE. Both artwork files are bundled for frozen execution and
+included in Python package data. The separate `branding/` kit contains the logo,
+ICO, launch banner, social graphic, copy, visual guide, and generation prompts.
