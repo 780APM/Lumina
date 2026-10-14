@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="#features">Features</a> ·
-  <a href="#getting-started">Getting started</a> ·
+  <a href="https://github.com/780APM/Lumina/releases/latest">Download for Windows</a> ·
   <a href="#development">Development</a> ·
   <a href="branding/README.md">Brand kit</a> ·
   <a href="LICENSE">MIT license</a>
@@ -34,12 +34,17 @@ Playback streams from disk instead of loading complete tracks into memory. Visua
 
 ## Getting started
 
-1. Open `Lumina.exe`.
+1. Download **Lumina.exe** from the [latest GitHub release](https://github.com/780APM/Lumina/releases/latest), then open it.
 2. Select **Add Files** and choose your local audio files.
 3. Select a track and press **Play** or **Space**.
 4. Open **Settings** to change the accent and visualizer mode.
 
-To create the portable EXE yourself, follow [Building the Windows app](#building-the-windows-app). The [Windows build workflow](https://github.com/780APM/Lumina/actions/workflows/windows-release.yml) can also be run manually by a repository maintainer; successful runs provide a `Lumina-windows` artifact containing the EXE.
+Release assets include the portable 64-bit Windows EXE, brand kit, and SHA-256
+checksums. See the [v0.1.0 release notes](docs/releases/v0.1.0.md) for details.
+
+To build the EXE yourself, follow [Building the Windows app](#building-the-windows-app).
+The [Windows build workflow](https://github.com/780APM/Lumina/actions/workflows/windows-release.yml)
+can also be run manually by a repository maintainer.
 
 ### Keyboard controls
 
